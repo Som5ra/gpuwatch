@@ -46,15 +46,24 @@ gpuwatch
 如果想自定义显示名或默认勾选某些服务器，可以建 `~/.config/gpuwatch/servers.yml`：
 
 ```yaml
-refresh_seconds: 1.5
-timeout_seconds: 5.0
+refresh_seconds: 1.5   # 轮询间隔
+timeout_seconds: 15.0  # 每次 SSH 探测的总超时（含 SSH 握手 + 远程执行）
 servers:
   - host: two4090
     label: "2x RTX 4090"
     enabled: true
+  - host: two4090-ts
+    label: "2x RTX 4090 (Tailscale)"
+    timeout: 25         # 慢链路可以单独给这台机器加大超时
   - host: a100-server
     label: "8x A100"
 ```
+
+### 超时怎么办
+
+`timeout_seconds` 覆盖的是**一整次探测**：TCP 连接 + SSH 握手 + 认证 + 远程 python 启动 + NVML 查询。走 Tailscale DERP 中继、跳板机或高延迟链路时，光 SSH 握手就要 8-10 秒（十几个往返），默认 15 秒就是为了留足这个预算；局域网机器一般 1 秒内完成。
+
+某台机器老是 TIMEOUT 就给它单独加 `timeout: 30`。另外 gpuwatch 会复用 SSH 连接（ControlMaster），握手成本只在第一次和断线后付一次，之后的轮询只花一个往返。
 
 ## 配色
 

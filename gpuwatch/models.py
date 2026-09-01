@@ -165,3 +165,4 @@ class ServerConfig:
     label: str  # display name
     enabled: bool = False  # whether polling is active
     ssh_user: str | None = None  # SSH login user (for process highlighting)
+    timeout: float | None = None  # per-server SSH timeout override (seconds)

@@ -14,7 +14,7 @@ from textual.containers import Horizontal
 from textual.widgets import Footer, Header
 
 from .collector import Collector
-from .config import discover_servers
+from .config import discover_servers, load_app_settings
 from .models import ServerConfig, ServerSnapshot
 from .ui.dashboard import Dashboard
 from .ui.server_selector import ServerItem, ServerSelector
@@ -54,7 +54,7 @@ class GPUWatchApp(App):
         Binding("c", "toggle_compact", "Compact", show=True),
     ]
 
-    def __init__(self, refresh: float = 1.5, timeout: float = 5.0) -> None:
+    def __init__(self, refresh: float = 1.5, timeout: float = 15.0) -> None:
         super().__init__()
         self._refresh_interval = refresh
         self._timeout = timeout
@@ -181,5 +181,9 @@ class GPUWatchApp(App):
 
 def main() -> None:
     """Entry point for `gpuwatch` command."""
-    app = GPUWatchApp(refresh=1.5, timeout=5.0)
+    settings = load_app_settings()
+    app = GPUWatchApp(
+        refresh=settings["refresh_seconds"],
+        timeout=settings["timeout_seconds"],
+    )
     app.run()

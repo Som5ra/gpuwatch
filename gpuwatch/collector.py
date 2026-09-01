@@ -29,7 +29,7 @@ class Collector:
         self,
         servers: list[ServerConfig],
         refresh_seconds: float = 1.5,
-        timeout_seconds: float = 5.0,
+        timeout_seconds: float = 15.0,
     ):
         self._servers: dict[str, ServerConfig] = {s.host: s for s in servers}
         self._tasks: dict[str, asyncio.Task[None]] = {}
@@ -91,12 +91,19 @@ class Collector:
     async def _poll_loop(self, host: str, label: str, ssh_user: str | None) -> None:
         """Single-server polling loop."""
         consecutive_failures = 0
+        config = self._servers.get(host)
+        # Per-server override wins over the global timeout. Slow links
+        # (e.g. Tailscale DERP relay) need a much larger first-connection
+        # budget than the global default.
+        effective_timeout = (
+            config.timeout if config and config.timeout else self._timeout
+        )
 
         while True:
             try:
                 offsets = self._reserved_offsets.get(host) or None
                 json_str, latency_ms = await ssh_executor.run_probe(
-                    host, timeout=self._timeout, own_user=ssh_user,
+                    host, timeout=effective_timeout, own_user=ssh_user,
                     reserved_offsets=offsets,
                 )
                 data = json.loads(json_str)

@@ -13,6 +13,7 @@ import os
 from typing import Any
 
 from .models import ServerConfig
+from .ssh_executor import DEFAULT_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,29 @@ def load_yaml_config(path: str | None = None) -> dict[str, Any] | None:
         return None
 
 
+def load_app_settings(yaml_path: str | None = None) -> dict[str, float]:
+    """Load global refresh/timeout settings from the optional YAML config.
+
+    Returns a dict with keys 'refresh_seconds' and 'timeout_seconds'.
+    `timeout_seconds` is the total budget for one SSH probe (handshake +
+    auth + remote execution) — slow links such as Tailscale DERP relays
+    need a full 8-10s handshake, so the default is generous.
+    """
+    yaml = load_yaml_config(yaml_path) or {}
+
+    def _positive(value: Any, default: float, minimum: float) -> float:
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            return default
+        return result if result >= minimum else default
+
+    return {
+        "refresh_seconds": _positive(yaml.get("refresh_seconds"), 1.5, 0.5),
+        "timeout_seconds": _positive(yaml.get("timeout_seconds"), DEFAULT_TIMEOUT, 3.0),
+    }
+
+
 def discover_servers(yaml_path: str | None = None) -> list[ServerConfig]:
     """Discover GPU servers from SSH config, optionally overlaid with YAML.
 
@@ -127,12 +151,19 @@ def discover_servers(yaml_path: str | None = None) -> list[ServerConfig]:
             host = entry["host"]
             ssh_info = ssh_map.get(host, {})
             label = entry.get("label", host)
+            timeout = entry.get("timeout")
+            if timeout is not None:
+                try:
+                    timeout = float(timeout)
+                except (TypeError, ValueError):
+                    timeout = None
             result.append(
                 ServerConfig(
                     host=host,
                     label=label,
                     enabled=entry.get("enabled", False),
                     ssh_user=ssh_info.get("user") or getpass.getuser(),
+                    timeout=timeout,
                 )
             )
         return result
