@@ -191,6 +191,8 @@ class ServerPanel(Static):
                 power_str(gpu.power_watts, gpu.power_limit_watts),
             )
 
+        wrapper.add_row(_format_host_summary(snap.host_info))
+        wrapper.add_row(Text(""))
         wrapper.add_row(gpu_grid)
 
         # ── Process details (free-form indented text below GPU grid) ──
@@ -249,4 +251,9 @@ class ServerPanel(Static):
                 Text(_truncate(proc_str, 23), style="green"),
             )
 
-        return gpu_grid
+        wrapper = Table(show_header=False, expand=True, box=None, padding=(0, 1))
+        wrapper.add_column("body", justify="left")
+        wrapper.add_row(_format_host_summary(snap.host_info))
+        wrapper.add_row(Text(""))
+        wrapper.add_row(gpu_grid)
+        return wrapper

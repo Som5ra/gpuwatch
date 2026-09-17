@@ -148,7 +148,7 @@ def discover_servers(yaml_path: str | None = None) -> list[ServerConfig]:
         # Use YAML-defined server list, enriching from SSH config
         result: list[ServerConfig] = []
         for entry in yaml["servers"]:
-            host = entry["host"]
+            host = str(entry["host"])
             ssh_info = ssh_map.get(host, {})
             label = entry.get("label", host)
             timeout = entry.get("timeout")
