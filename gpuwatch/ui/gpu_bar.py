@@ -122,6 +122,7 @@ def _resample(values: Sequence[float], width: int) -> list[float]:
 
 
 
+
 def _right_align_zeros(values: Sequence[float], n: int) -> list[float]:
     """nvtop ring fill: left zeros, newest samples on the right."""
     vals = [max(0.0, min(100.0, float(v))) for v in values]
@@ -133,7 +134,7 @@ def _right_align_zeros(values: Sequence[float], n: int) -> list[float]:
 
 
 def _data_level(rows: int, data: float, increment: float) -> int:
-    """Exact port of nvtop data_level()."""
+    """Exact port of nvtop data_level(). ``rows`` is already window_height-1."""
     return int(rows - round(float(data) / increment))
 
 
@@ -146,27 +147,32 @@ def nvtop_line_chart(
 ) -> Table:
     """Exact Python port of Syllo/nvtop src/plot.c :: nvtop_line_plot.
 
-    - 2 series interleaved column-wise (GPU%, MEM%)
-    - ACS stair-steps with full verticals on level changes (no softening)
-    - Empty history zero-filled on the left like nvtop's ring buffer
-    - Y: 100 at top, 0 at bottom
+    Critical detail from plot.c:
+      getmaxyx(win, rows, cols);
+      rows -= 1;
+      increment = 100. / (double)(rows);
+    so 0% maps to y==rows (== last visible row), never one past it.
+    Our earlier bug used ``rows = height`` without the -=1, so 0% was drawn
+    on an invisible extra row; fold-back left a gap at big 100↔0 corners
+    (the red-box break).
     """
     num_lines = 2
-    # nvtop: getmaxyx then rows -= 1; increment = 100/rows
-    rows = max(int(height), 2)
+    # Visible plot rows in the Rich table (like ncurses window height).
+    win_rows = max(int(height), 2)
+    # nvtop: rows -= 1 before data_level / increment
+    rows = win_rows - 1
+    increment = 100.0 / float(rows)
+
     cols = max(int(width), num_lines)
-    # num_data == cols in nvtop; each timestep uses num_lines columns
     if cols % num_lines:
         cols -= cols % num_lines
     cols = max(cols, num_lines)
     num_data = cols
-    increment = 100.0 / float(rows)
     n_samples = num_data // num_lines
 
     util = _right_align_zeros(util_history, n_samples)
     mem = _right_align_zeros(mem_history, n_samples)
 
-    # Interleaved: data[i+k] == series k at sample i/num_lines
     data: list[float] = []
     for s in range(n_samples):
         data.append(util[s])
@@ -177,16 +183,17 @@ def nvtop_line_chart(
     LLCORNER, LRCORNER = "└", "┘"
     TTEE, BTEE, PLUS = "┬", "┴", "┼"
 
-    # Allow row index up to `rows` (0% can map to rows); fold later.
-    grid = [[" " for _ in range(cols)] for _ in range(rows + 1)]
-    colors: list[list[str | None]] = [[None for _ in range(cols)] for _ in range(rows + 1)]
+    # y in 0..rows inclusive == 0..win_rows-1
+    grid = [[" " for _ in range(cols)] for _ in range(win_rows)]
+    colors: list[list[str | None]] = [[None for _ in range(cols)] for _ in range(win_rows)]
     line_colors = ["cyan", "dark_orange"]
     legends = ["GPU0 %", "GPU0 mem%"]
 
     def set_cell(r: int, c: int, ch: str, color: str) -> None:
+        # Clamp to visible rows only (0..rows).
         if r < 0:
             r = 0
-        if r > rows:
+        elif r > rows:
             r = rows
         if 0 <= c < cols:
             grid[r][c] = ch
@@ -194,15 +201,15 @@ def nvtop_line_chart(
 
     lvl_before = [_data_level(rows, data[k], increment) for k in range(num_lines)]
 
-    # Faithful loop from plot.c
     i = 0
-    while i < num_data or i < cols:
-        if i >= cols:
-            break
+    while i < num_data and i < cols:
         for k in range(num_lines):
             if i + k >= len(data):
                 break
             lvl_now = _data_level(rows, data[i + k], increment)
+            # Keep levels inside the window (numerical safety).
+            lvl_now = max(0, min(rows, lvl_now))
+            lvl_before[k] = max(0, min(rows, lvl_before[k]))
             color = line_colors[k]
             col = i + k
 
@@ -219,45 +226,47 @@ def nvtop_line_chart(
                     if j == k:
                         continue
                     jc = line_colors[j]
-                    if lvl_before[j] == top:
+                    lj = max(0, min(rows, lvl_before[j]))
+                    if lj == top:
                         set_cell(top, col, BTEE, jc)
-                    elif lvl_before[j] == bottom:
+                    elif lj == bottom:
                         set_cell(bottom, col, TTEE, jc)
-                    elif bottom < lvl_before[j] < top:
-                        set_cell(lvl_before[j], col, PLUS, jc)
+                    elif bottom < lj < top:
+                        set_cell(lj, col, PLUS, jc)
                     else:
-                        set_cell(lvl_before[j], col, HLINE, jc)
+                        set_cell(lj, col, HLINE, jc)
             else:
                 set_cell(lvl_now, col, HLINE, color)
                 for j in range(num_lines):
                     if j != k and lvl_before[j] != lvl_now:
-                        set_cell(lvl_before[j], col, HLINE, line_colors[j])
+                        set_cell(
+                            max(0, min(rows, lvl_before[j])),
+                            col,
+                            HLINE,
+                            line_colors[j],
+                        )
 
             lvl_before[k] = lvl_now
         i += num_lines
 
-    # Fold overflow row `rows` onto last visible row
-    for c in range(cols):
-        if grid[rows][c] != " " and grid[rows - 1][c] == " ":
-            grid[rows - 1][c] = grid[rows][c]
-            colors[rows - 1][c] = colors[rows][c]
-
-    # Y ticks like initialize_gpu_mem_plot: 100,75,50,25,0
+    # Y ticks like initialize_gpu_mem_plot (positions relative to plot rows).
+    # nvtop prints at: 1, 1+rows/4, 1+rows/2, 1+rows*3/4, rows  within the
+    # outer window; inside the plot window those are 0, rows/4, ...
     tick_at: dict[int, int] = {}
     for tick, row_expr in (
         (100, 0),
         (75, rows // 4),
         (50, rows // 2),
         (25, (rows * 3) // 4),
-        (0, rows - 1),
+        (0, rows),
     ):
-        tick_at.setdefault(max(0, min(rows - 1, row_expr)), tick)
+        tick_at.setdefault(max(0, min(rows, row_expr)), tick)
 
     box = Table(show_header=False, expand=True, box=None, padding=0)
     box.add_column("y", width=4, justify="right", no_wrap=True)
     box.add_column("plot", justify="left", no_wrap=True)
 
-    for r in range(rows):
+    for r in range(win_rows):
         y_txt = Text(f"{tick_at[r]:3d}" if r in tick_at else "   ", style="bright_black")
         line = Text()
         line.append("│", style="bright_black")
