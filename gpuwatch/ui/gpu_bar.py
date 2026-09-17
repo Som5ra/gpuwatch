@@ -118,56 +118,101 @@ def _resample(values: Sequence[float], width: int) -> list[float]:
     return out
 
 
-def history_plot(
-    values: Sequence[float],
+def _pad_history(values: Sequence[float], width: int) -> list[float]:
+    """Left-pad with None-equivalent gaps as 0, keep newest on the right."""
+    vals = [float(v) for v in values]
+    if len(vals) >= width:
+        return vals[-width:]
+    return [0.0] * (width - len(vals)) + vals
+
+
+def nvtop_line_chart(
+    util_history: Sequence[float],
+    mem_history: Sequence[float],
     *,
-    width: int = 48,
-    height: int = 4,
-    label: str = "GPU",
+    width: int = 64,
+    height: int = 10,
 ) -> Table:
-    """nvtop-like multi-row area plot (0-100%)."""
-    box = Table(show_header=False, expand=False, box=None, padding=0)
-    box.add_column("y", width=4, justify="right")
-    box.add_column("plot", justify="left")
+    """Single nvtop-style chart: two thin lines, Y ticks 100..0 at plot edges."""
+    # height = number of plot rows. Labels sit on row boundaries:
+    # top row label 100, bottom row label 0 (on the same row as baseline).
+    util = _pad_history(util_history, width)
+    mem = _pad_history(mem_history, width)
 
-    samples = _resample([float(v) for v in values], width)
-    # Pad left with zeros until we have history
-    if len(values) < width:
-        pad = width - len(values)
-        samples = [0.0] * pad + [float(v) for v in values]
+    # Character grid: height rows x width cols. row 0 = 100%, row height-1 = 0%.
+    grid: list[list[str]] = [[" " for _ in range(width)] for _ in range(height)]
+    style_grid: list[list[str | None]] = [[None for _ in range(width)] for _ in range(height)]
 
-    rows: list[Text] = [Text() for _ in range(height)]
-    for v in samples:
-        level = int(round(max(0.0, min(v, 100.0)) / 100.0 * height * 8))
-        for r in range(height):
-            # top row is high values
-            row_from_top = r
-            # capacity in this row: 8 sublevels
-            lo = (height - 1 - row_from_top) * 8
-            hi = lo + 8
-            if level >= hi:
-                ch = "█"
-                style = "yellow"
-            elif level > lo:
-                ch = _LEVELS[level - lo]
-                style = "yellow"
-            else:
-                ch = " "
-                style = "bright_black"
-            rows[r].append(ch, style=style)
+    def plot_line(series: list[float], glyph: str, color: str) -> None:
+        prev_row: int | None = None
+        for x, v in enumerate(series):
+            v = max(0.0, min(100.0, v))
+            # Map 100 -> row 0, 0 -> row height-1
+            row = int(round((100.0 - v) / 100.0 * (height - 1)))
+            row = max(0, min(height - 1, row))
+            # Vertical connector if jumped
+            if prev_row is not None and prev_row != row:
+                lo, hi = sorted((prev_row, row))
+                for r in range(lo, hi + 1):
+                    if grid[r][x] == " ":
+                        grid[r][x] = "│"
+                        style_grid[r][x] = color
+            grid[row][x] = glyph
+            style_grid[row][x] = color
+            prev_row = row
 
-    y_labels = ["100", " 75", " 50", " 25"] if height == 4 else [f"{int(100*(height-r)/height):3d}" for r in range(height)]
+    # mem first so util paints on top when they overlap
+    plot_line(mem, "─", "dark_orange")
+    plot_line(util, "─", "cyan")
+
+    box = Table(show_header=False, expand=True, box=None, padding=0)
+    box.add_column("y", width=4, justify="right", no_wrap=True)
+    box.add_column("plot", justify="left", no_wrap=True)
+
+    # Legend on first plot row
+    # Map canonical ticks onto rows (100 at top, 0 at bottom)
+    tick_at_row: dict[int, int] = {0: 100, height - 1: 0}
+    if height > 1:
+        for tick in (75, 50, 25):
+            tr = int(round((100 - tick) / 100.0 * (height - 1)))
+            tick_at_row.setdefault(tr, tick)
+
     for r in range(height):
-        label_t = Text(y_labels[r] if r < len(y_labels) else "", style="bright_black")
-        frame = Text("│", style="bright_black")
-        frame += rows[r]
-        frame.append("│", style="bright_black")
-        if r == 0:
-            frame.append(f" {label}", style="bright_black")
-        box.add_row(label_t, frame)
+        if r in tick_at_row:
+            y_txt = Text(f"{tick_at_row[r]:3d}", style="bright_black")
+        else:
+            y_txt = Text("   ", style="bright_black")
 
-    axis = Text("└" + "─" * width + "┘", style="bright_black")
-    box.add_row(Text("  0", style="bright_black"), axis)
+        line = Text()
+        line.append("│", style="bright_black")
+        for x in range(width):
+            ch = grid[r][x]
+            st = style_grid[r][x] or "bright_black"
+            line.append(ch if ch != " " else " ", style=st)
+        line.append("│", style="bright_black")
+        if r == 0:
+            line.append(" ", style="bright_black")
+            line.append("GPU%", style="cyan")
+            line.append(" ", style="bright_black")
+            line.append("MEM%", style="dark_orange")
+        box.add_row(y_txt, line)
+
+    # Bottom axis with time hints (newest on the right, like nvtop)
+    axis = Text("└", style="bright_black")
+    axis.append("─" * width, style="bright_black")
+    axis.append("┘", style="bright_black")
+    # newest on the right, like nvtop
+    tline = Text("    ", style="bright_black")
+    left, mid, right = f"-{width}", f"-{width // 2}", "-0"
+    pad_mid = max(width // 2 - len(left) - len(mid) // 2, 1)
+    pad_right = max(width - len(left) - pad_mid - len(mid) - len(right), 1)
+    tline.append(left, style="bright_black")
+    tline.append(" " * pad_mid, style="bright_black")
+    tline.append(mid, style="bright_black")
+    tline.append(" " * pad_right, style="bright_black")
+    tline.append(right, style="bright_black")
+    box.add_row(Text("   ", style="bright_black"), axis)
+    box.add_row(Text("   ", style="bright_black"), tline)
     return box
 
 
@@ -177,9 +222,9 @@ def nvtop_gpu_block(
     compact: bool = False,
     util_history: Sequence[float] | None = None,
     mem_history: Sequence[float] | None = None,
-    plot_width: int = 48,
+    plot_width: int = 72,
 ) -> Table:
-    """Render one GPU in an nvtop-like block with optional history plots."""
+    """Render one GPU in an nvtop-like block with a dual-line history chart."""
     box = Table(show_header=False, expand=True, box=None, padding=0)
     box.add_column("body", justify="left")
 
@@ -201,14 +246,10 @@ def nvtop_gpu_block(
         line.append("  ", style="bright_black")
         line += power_str(gpu.power_watts, gpu.power_limit_watts)
         box.add_row(line)
-        # one-line spark even in compact
-        hist = list(util_history or [])
-        if hist:
-            spark = Text("  ")
-            for v in _resample(hist, min(plot_width, 32)):
-                idx = int(round(max(0.0, min(v, 100.0)) / 100.0 * 8))
-                spark.append(_LEVELS[idx] if idx > 0 else " ", style="yellow")
-            box.add_row(spark)
+        util_h = list(util_history or [])
+        mem_h = list(mem_history or [])
+        if util_h or mem_h:
+            box.add_row(nvtop_line_chart(util_h, mem_h, width=min(plot_width, 48), height=6))
         return box
 
     gpu_line = Text()
@@ -228,15 +269,12 @@ def nvtop_gpu_block(
     meta += power_str(gpu.power_watts, gpu.power_limit_watts)
     mem_pct = gpu.memory_percent
     meta.append("   MEM-UTIL ", style="bright_black")
-    meta.append(f"{mem_pct:.0f}%", style="yellow")
+    meta.append(f"{mem_pct:.0f}%", style="dark_orange")
     box.add_row(meta)
 
     util_h = list(util_history or [])
     mem_h = list(mem_history or [])
-    if util_h:
+    if util_h or mem_h:
         box.add_row(Text(""))
-        box.add_row(history_plot(util_h, width=plot_width, height=4, label="GPU-Util"))
-    if mem_h:
-        box.add_row(Text(""))
-        box.add_row(history_plot(mem_h, width=plot_width, height=3, label="MEM-Util"))
+        box.add_row(nvtop_line_chart(util_h, mem_h, width=plot_width, height=10))
     return box

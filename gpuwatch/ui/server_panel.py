@@ -151,7 +151,7 @@ class ServerPanel(Static):
         self.compact: bool = False
         self.name_width: int = 10  # set by Dashboard, updated dynamically
         # Per-GPU utilization / memory history for nvtop-like plots
-        self._hist_len = 60
+        self._hist_len = 90
         self._util_hist: dict[int, deque[float]] = {}
         self._mem_hist: dict[int, deque[float]] = {}
 
@@ -316,6 +316,6 @@ class ServerPanel(Static):
                 compact=True,
                 util_history=self._util_hist.get(gpu.index),
                 mem_history=self._mem_hist.get(gpu.index),
-                plot_width=32,
+                plot_width=56,
             ))
         return wrapper
