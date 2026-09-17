@@ -121,19 +121,20 @@ def _resample(values: Sequence[float], width: int) -> list[float]:
 
 
 
-def _pad_history(values: Sequence[float], n: int) -> list[float | None]:
-    """Right-align real samples. Missing left slots stay None (not drawn as 0%)."""
+
+def _right_align_zeros(values: Sequence[float], n: int) -> list[float]:
+    """nvtop ring fill: left zeros, newest samples on the right."""
     vals = [max(0.0, min(100.0, float(v))) for v in values]
     if n <= 0:
         return []
     if len(vals) >= n:
-        return list(vals[-n:])
-    return [None] * (n - len(vals)) + vals
+        return vals[-n:]
+    return [0.0] * (n - len(vals)) + vals
 
 
 def _data_level(rows: int, data: float, increment: float) -> int:
-    """Port of nvtop data_level(): row 0 is top (100%)."""
-    return int(rows - round(data / increment))
+    """Exact port of nvtop data_level()."""
+    return int(rows - round(float(data) / increment))
 
 
 def nvtop_line_chart(
@@ -143,138 +144,124 @@ def nvtop_line_chart(
     width: int = 72,
     height: int = 12,
 ) -> Table:
-    """Faithful port of Syllo/nvtop src/plot.c nvtop_line_plot.
+    """Exact Python port of Syllo/nvtop src/plot.c :: nvtop_line_plot.
 
-    Solid ACS lines (─ │ ┌ ┐ └ ┘ ┬ ┴ ┼). Two series interleaved so each
-    column also continues the other series — that is what makes nvtop look
-    continuous rather than dashed.
-
-    Left side stays blank until real samples exist (no fake 0% padding that
-    turned cold-start 0→100 jumps into a giant rectangle).
+    - 2 series interleaved column-wise (GPU%, MEM%)
+    - ACS stair-steps with full verticals on level changes (no softening)
+    - Empty history zero-filled on the left like nvtop's ring buffer
+    - Y: 100 at top, 0 at bottom
     """
     num_lines = 2
-    rows = max(height, 2)
+    # nvtop: getmaxyx then rows -= 1; increment = 100/rows
+    rows = max(int(height), 2)
+    cols = max(int(width), num_lines)
+    # num_data == cols in nvtop; each timestep uses num_lines columns
+    if cols % num_lines:
+        cols -= cols % num_lines
+    cols = max(cols, num_lines)
+    num_data = cols
     increment = 100.0 / float(rows)
+    n_samples = num_data // num_lines
 
-    # Each time sample occupies num_lines columns (nvtop layout).
-    n_samples = max(width // num_lines, 1)
-    plot_cols = n_samples * num_lines
+    util = _right_align_zeros(util_history, n_samples)
+    mem = _right_align_zeros(mem_history, n_samples)
 
-    util = _pad_history(util_history, n_samples)
-    mem = _pad_history(mem_history, n_samples)
-    n_real = sum(1 for v in util if v is not None)
+    # Interleaved: data[i+k] == series k at sample i/num_lines
+    data: list[float] = []
+    for s in range(n_samples):
+        data.append(util[s])
+        data.append(mem[s])
 
-    # Unicode ACS equivalents used by nvtop
     HLINE, VLINE = "─", "│"
     ULCORNER, URCORNER = "┌", "┐"
     LLCORNER, LRCORNER = "└", "┘"
     TTEE, BTEE, PLUS = "┬", "┴", "┼"
 
-    grid = [[" " for _ in range(plot_cols)] for _ in range(rows + 1)]
-    colors: list[list[str | None]] = [[None for _ in range(plot_cols)] for _ in range(rows + 1)]
+    # Allow row index up to `rows` (0% can map to rows); fold later.
+    grid = [[" " for _ in range(cols)] for _ in range(rows + 1)]
+    colors: list[list[str | None]] = [[None for _ in range(cols)] for _ in range(rows + 1)]
     line_colors = ["cyan", "dark_orange"]
     legends = ["GPU0 %", "GPU0 mem%"]
 
     def set_cell(r: int, c: int, ch: str, color: str) -> None:
-        r = max(0, min(rows, r))
-        if 0 <= c < plot_cols:
+        if r < 0:
+            r = 0
+        if r > rows:
+            r = rows
+        if 0 <= c < cols:
             grid[r][c] = ch
             colors[r][c] = color
 
-    # Find first column index that has real data; skip blank prefix entirely.
-    first_real = 0
-    while first_real < n_samples and util[first_real] is None and mem[first_real] is None:
-        first_real += 1
+    lvl_before = [_data_level(rows, data[k], increment) for k in range(num_lines)]
 
-    if first_real < n_samples:
-        # Seed levels from first real sample of each series (fallback 0 only for level math).
-        def seed_val(series: list[float | None], idx: int) -> float:
-            for j in range(idx, n_samples):
-                if series[j] is not None:
-                    return float(series[j])
-            return 0.0
+    # Faithful loop from plot.c
+    i = 0
+    while i < num_data or i < cols:
+        if i >= cols:
+            break
+        for k in range(num_lines):
+            if i + k >= len(data):
+                break
+            lvl_now = _data_level(rows, data[i + k], increment)
+            color = line_colors[k]
+            col = i + k
 
-        lvl_before = [
-            _data_level(rows, seed_val(util, first_real), increment),
-            _data_level(rows, seed_val(mem, first_real), increment),
-        ]
-
-        for s in range(first_real, n_samples):
-            sample_vals = [util[s], mem[s]]
-            i = s * num_lines  # column base, like nvtop's i
-            for k in range(num_lines):
-                raw = sample_vals[k]
-                if raw is None:
-                    # No sample yet for this series — still continue the other line
-                    # on this column if it already has a level.
-                    continue
-                lvl_now = _data_level(rows, float(raw), increment)
-                col = i + k
-                color = line_colors[k]
-
-                if lvl_before[k] != lvl_now:
-                    drawing_down = lvl_before[k] < lvl_now
-                    bottom = lvl_before[k] if drawing_down else lvl_now
-                    top = lvl_now if drawing_down else lvl_before[k]
-                    jump = top - bottom
-                    # Full-height ACS walls on 100↔0 look like a door/box.
-                    # Keep nvtop stairs for modest steps; for huge jumps just
-                    # start a new horizontal run (official screenshots also
-                    # read as floating ─ segments more than tall │ shafts).
-                    max_stair = max(2, rows // 5)
-                    if jump <= max_stair:
-                        set_cell(bottom, col, URCORNER if drawing_down else ULCORNER, color)
-                        set_cell(top, col, LLCORNER if drawing_down else LRCORNER, color)
-                        if jump > 1:
-                            for r in range(bottom + 1, top):
-                                set_cell(r, col, VLINE, color)
-                        for j in range(num_lines):
-                            if j == k:
-                                continue
-                            jc = line_colors[j]
-                            if lvl_before[j] == top:
-                                set_cell(top, col, BTEE, jc)
-                            elif lvl_before[j] == bottom:
-                                set_cell(bottom, col, TTEE, jc)
-                            elif bottom < lvl_before[j] < top:
-                                set_cell(lvl_before[j], col, PLUS, jc)
-                            else:
-                                set_cell(lvl_before[j], col, HLINE, jc)
+            if lvl_before[k] < lvl_now or lvl_before[k] > lvl_now:
+                drawing_down = lvl_before[k] < lvl_now
+                bottom = lvl_before[k] if drawing_down else lvl_now
+                top = lvl_now if drawing_down else lvl_before[k]
+                set_cell(bottom, col, URCORNER if drawing_down else ULCORNER, color)
+                set_cell(top, col, LLCORNER if drawing_down else LRCORNER, color)
+                if top - bottom > 1:
+                    for r in range(bottom + 1, top):
+                        set_cell(r, col, VLINE, color)
+                for j in range(num_lines):
+                    if j == k:
+                        continue
+                    jc = line_colors[j]
+                    if lvl_before[j] == top:
+                        set_cell(top, col, BTEE, jc)
+                    elif lvl_before[j] == bottom:
+                        set_cell(bottom, col, TTEE, jc)
+                    elif bottom < lvl_before[j] < top:
+                        set_cell(lvl_before[j], col, PLUS, jc)
                     else:
-                        set_cell(lvl_now, col, HLINE, color)
-                        for j in range(num_lines):
-                            if j != k:
-                                set_cell(lvl_before[j], col, HLINE, line_colors[j])
-                else:
-                    set_cell(lvl_now, col, HLINE, color)
-                    for j in range(num_lines):
-                        if j != k and lvl_before[j] != lvl_now:
-                            set_cell(lvl_before[j], col, HLINE, line_colors[j])
+                        set_cell(lvl_before[j], col, HLINE, jc)
+            else:
+                set_cell(lvl_now, col, HLINE, color)
+                for j in range(num_lines):
+                    if j != k and lvl_before[j] != lvl_now:
+                        set_cell(lvl_before[j], col, HLINE, line_colors[j])
 
-                lvl_before[k] = lvl_now
+            lvl_before[k] = lvl_now
+        i += num_lines
 
-    # Fold level==rows onto last visible row
-    for c in range(plot_cols):
-        if grid[rows][c] != " ":
-            if grid[rows - 1][c] == " ":
-                grid[rows - 1][c] = grid[rows][c]
-                colors[rows - 1][c] = colors[rows][c]
+    # Fold overflow row `rows` onto last visible row
+    for c in range(cols):
+        if grid[rows][c] != " " and grid[rows - 1][c] == " ":
+            grid[rows - 1][c] = grid[rows][c]
+            colors[rows - 1][c] = colors[rows][c]
+
+    # Y ticks like initialize_gpu_mem_plot: 100,75,50,25,0
+    tick_at: dict[int, int] = {}
+    for tick, row_expr in (
+        (100, 0),
+        (75, rows // 4),
+        (50, rows // 2),
+        (25, (rows * 3) // 4),
+        (0, rows - 1),
+    ):
+        tick_at.setdefault(max(0, min(rows - 1, row_expr)), tick)
 
     box = Table(show_header=False, expand=True, box=None, padding=0)
     box.add_column("y", width=4, justify="right", no_wrap=True)
     box.add_column("plot", justify="left", no_wrap=True)
 
-    tick_at: dict[int, int] = {}
-    for tick in (100, 75, 50, 25, 0):
-        tr = _data_level(rows, float(tick), increment)
-        tr = max(0, min(rows - 1, tr))
-        tick_at.setdefault(tr, tick)
-
     for r in range(rows):
         y_txt = Text(f"{tick_at[r]:3d}" if r in tick_at else "   ", style="bright_black")
         line = Text()
         line.append("│", style="bright_black")
-        for c in range(plot_cols):
+        for c in range(cols):
             ch = grid[r][c]
             st = colors[r][c] or "bright_black"
             line.append(ch if ch != " " else " ", style=st)
@@ -284,12 +271,11 @@ def nvtop_line_chart(
             line.append(legends[r], style=line_colors[r])
         box.add_row(y_txt, line)
 
-    axis = Text("└" + "─" * plot_cols + "┘", style="bright_black")
-    span = max(n_real, 1)
-    left, mid, right = f"-{span}", f"-{span // 2}", "-0"
+    axis = Text("└" + "─" * cols + "┘", style="bright_black")
+    left, mid, right = f"-{n_samples}", f"-{n_samples // 2}", "-0"
     tline = Text("    ", style="bright_black")
-    pad_mid = max(plot_cols // 2 - len(left) - len(mid) // 2, 1)
-    pad_right = max(plot_cols - len(left) - pad_mid - len(mid) - len(right), 1)
+    pad_mid = max(cols // 2 - len(left) - len(mid) // 2, 1)
+    pad_right = max(cols - len(left) - pad_mid - len(mid) - len(right), 1)
     tline.append(left + " " * pad_mid + mid + " " * pad_right + right, style="bright_black")
     box.add_row(Text("   ", style="bright_black"), axis)
     box.add_row(Text("   ", style="bright_black"), tline)
