@@ -21,51 +21,32 @@ from .gpu_bar import _bar_style, _format_mem, memory_bar, power_str, temp_str, u
 
 
 def _mini_bar(percent: float, width: int = 10) -> Text:
-    """Compact htop-style bar."""
+    """Compact bar: yellow fill, empty unused."""
     pct = max(0.0, min(float(percent), 100.0))
     filled = int(round(pct / 100.0 * width))
     filled = min(filled, width)
-    bar = "█" * filled + "░" * (width - filled)
-    t = Text(bar, style=_bar_style(pct))
-    t.append(f"{pct:3.0f}%", style=_bar_style(pct))
-    return t
+    out = Text()
+    if filled:
+        out.append("█" * filled, style="yellow")
+    if width - filled:
+        out.append(" " * (width - filled), style="bright_black")
+    out.append(f"{pct:3.0f}%", style="yellow")
+    return out
 
 
 def _mem_stack_bar(host: HostInfo, width: int = 24) -> Text:
-    """htop-like Mem bar: used / buffers / cache / free."""
+    """Mem bar: yellow used portion, unused left blank."""
     total = max(host.mem_total_mb, 1)
-    used = max(host.mem_used_mb, 0)
-    buffers = max(host.mem_buffers_mb, 0)
-    cached = max(host.mem_cached_mb, 0)
-    # Scale segments into width
-    parts = [
-        (used, "green"),
-        (buffers, "blue"),
-        (cached, "yellow"),
-    ]
-    units = 0
-    segs: list[tuple[int, str]] = []
-    for amt, color in parts:
-        n = int(round(amt / total * width))
-        segs.append((n, color))
-        units += n
-    free_n = max(width - units, 0)
-    # Fix overflow
-    while sum(n for n, _ in segs) + free_n > width and segs:
-        # trim last non-zero
-        for i in range(len(segs) - 1, -1, -1):
-            if segs[i][0] > 0:
-                segs[i] = (segs[i][0] - 1, segs[i][1])
-                break
-        else:
-            break
-    free_n = width - sum(n for n, _ in segs)
+    # used + buffers + cache as "occupied" like a simple meter
+    occupied = max(host.mem_used_mb, 0) + max(host.mem_buffers_mb, 0) + max(host.mem_cached_mb, 0)
+    occupied = min(occupied, total)
+    filled = int(round(occupied / total * width))
+    filled = min(filled, width)
     out = Text()
-    for n, color in segs:
-        if n:
-            out.append("█" * n, style=color)
-    if free_n:
-        out.append("░" * free_n, style="bright_black")
+    if filled:
+        out.append("█" * filled, style="yellow")
+    if width - filled:
+        out.append(" " * (width - filled), style="bright_black")
     used_g = host.mem_used_mb / 1024
     total_g = host.mem_total_mb / 1024
     out.append(f" {used_g:.1f}/{total_g:.1f}G", style="white")

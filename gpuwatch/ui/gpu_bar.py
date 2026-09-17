@@ -31,12 +31,16 @@ def _render_bar(percent: float, width: int) -> str:
 
 
 def utilization_bar(percent: int, width: int = 10) -> Text:
-    """Render a utilization bar like: '████████░░ 72%'."""
+    """Render a utilization bar: yellow fill, blank unused."""
     pct = max(0, min(percent, 100))
-    style = _bar_style(pct)
-    bar_str = _render_bar(pct, width)
-    result = Text(bar_str, style=style)
-    result.append(f" {pct:3d}%", style=style)
+    filled = int(round(pct / 100.0 * width))
+    filled = min(filled, width)
+    result = Text()
+    if filled:
+        result.append("█" * filled, style="yellow")
+    if width - filled:
+        result.append(" " * (width - filled))
+    result.append(f" {pct:3d}%", style="yellow")
     return result
 
 
@@ -52,16 +56,20 @@ def _format_mem(mb: int) -> str:
 
 
 def memory_bar(used_mb: int, total_mb: int, width: int = 16) -> Text:
-    """Render a memory bar like: '████████░░░░ 21.24GiB / 23.99GiB'."""
+    """Render a memory bar: yellow fill, blank unused."""
     if total_mb <= 0:
-        return Text("─" * width + " N/A")
+        return Text(" " * width + " N/A")
     pct = (used_mb / total_mb) * 100.0
-    style = _bar_style(pct)
-    bar_str = _render_bar(pct, width)
+    filled = int(round(min(pct, 100.0) / 100.0 * width))
+    filled = min(filled, width)
     used_str = _format_mem(used_mb)
     total_str = _format_mem(total_mb)
-    result = Text(bar_str, style=style)
-    result.append(f" {used_str} / {total_str}", style=style)
+    result = Text()
+    if filled:
+        result.append("█" * filled, style="yellow")
+    if width - filled:
+        result.append(" " * (width - filled))
+    result.append(f" {used_str} / {total_str}", style="yellow")
     return result
 
 
