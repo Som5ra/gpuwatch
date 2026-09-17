@@ -118,99 +118,155 @@ def _resample(values: Sequence[float], width: int) -> list[float]:
     return out
 
 
-def _pad_history(values: Sequence[float], width: int) -> list[float]:
-    """Left-pad with None-equivalent gaps as 0, keep newest on the right."""
-    vals = [float(v) for v in values]
-    if len(vals) >= width:
-        return vals[-width:]
-    return [0.0] * (width - len(vals)) + vals
+
+def _pad_history(values: Sequence[float], n: int) -> list[float]:
+    vals = [max(0.0, min(100.0, float(v))) for v in values]
+    if n <= 0:
+        return []
+    if len(vals) >= n:
+        return vals[-n:]
+    return [0.0] * (n - len(vals)) + vals
+
+
+def _data_level(rows: int, data: float, increment: float) -> int:
+    """Port of nvtop data_level(): row 0 is top (100%), larger row is lower util."""
+    return int(rows - round(data / increment))
 
 
 def nvtop_line_chart(
     util_history: Sequence[float],
     mem_history: Sequence[float],
     *,
-    width: int = 64,
-    height: int = 10,
+    width: int = 72,
+    height: int = 12,
 ) -> Table:
-    """Single nvtop-style chart: two thin lines, Y ticks 100..0 at plot edges."""
-    # height = number of plot rows. Labels sit on row boundaries:
-    # top row label 100, bottom row label 0 (on the same row as baseline).
-    util = _pad_history(util_history, width)
-    mem = _pad_history(mem_history, width)
+    """Faithful port of nvtop's nvtop_line_plot (src/plot.c).
 
-    # Character grid: height rows x width cols. row 0 = 100%, row height-1 = 0%.
-    grid: list[list[str]] = [[" " for _ in range(width)] for _ in range(height)]
-    style_grid: list[list[str | None]] = [[None for _ in range(width)] for _ in range(height)]
+    - Two series interleaved column-wise: util, mem, util, mem, ...
+    - Stair-step lines with box-drawing corners (ACS_* equivalents)
+    - Y ticks 100/75/50/25/0 with 0 on the bottom plot row
+    """
+    num_lines = 2
+    # nvtop uses (rows) plot rows; window rows-1 after border. We use `height` rows.
+    rows = max(height, 2)
+    increment = 100.0 / float(rows)
 
-    def plot_line(series: list[float], glyph: str, color: str) -> None:
-        prev_row: int | None = None
-        for x, v in enumerate(series):
-            v = max(0.0, min(100.0, v))
-            # Map 100 -> row 0, 0 -> row height-1
-            row = int(round((100.0 - v) / 100.0 * (height - 1)))
-            row = max(0, min(height - 1, row))
-            # Vertical connector if jumped
-            if prev_row is not None and prev_row != row:
-                lo, hi = sorted((prev_row, row))
-                for r in range(lo, hi + 1):
-                    if grid[r][x] == " ":
-                        grid[r][x] = "│"
-                        style_grid[r][x] = color
-            grid[row][x] = glyph
-            style_grid[row][x] = color
-            prev_row = row
+    # Number of time samples: each sample occupies num_lines columns
+    n_samples = max(width // num_lines, 1)
+    plot_cols = n_samples * num_lines
 
-    # mem first so util paints on top when they overlap
-    plot_line(mem, "─", "dark_orange")
-    plot_line(util, "─", "cyan")
+    util = _pad_history(util_history, n_samples)
+    mem = _pad_history(mem_history, n_samples)
+
+    # Interleaved like nvtop: data[i+k] for sample i/num_lines, line k
+    data: list[float] = []
+    for s in range(n_samples):
+        data.append(util[s])
+        data.append(mem[s])
+
+    # Character + color grids. Allow row index 0..rows inclusive briefly, then clamp draws.
+    # nvtop can compute level==rows for 0%; we map that onto the last row.
+    grid = [[" " for _ in range(plot_cols)] for _ in range(rows + 1)]
+    colors: list[list[str | None]] = [[None for _ in range(plot_cols)] for _ in range(rows + 1)]
+
+    line_colors = ["cyan", "dark_orange"]  # GPU%, MEM% — matches nvtop teal/brown feel
+    legends = ["GPU0 %", "GPU0 mem%"]
+
+    # Unicode ACS equivalents
+    HLINE, VLINE = "─", "│"
+    ULCORNER, URCORNER = "┌", "┐"
+    LLCORNER, LRCORNER = "└", "┘"
+    TTEE, BTEE, PLUS = "┬", "┴", "┼"
+
+    def set_cell(r: int, c: int, ch: str, color: str) -> None:
+        r = max(0, min(rows, r))
+        if 0 <= c < plot_cols:
+            grid[r][c] = ch
+            colors[r][c] = color
+
+    lvl_before = [_data_level(rows, data[k], increment) for k in range(num_lines)]
+
+    for i in range(0, len(data), num_lines):
+        if i // num_lines >= n_samples:
+            break
+        for k in range(num_lines):
+            if i + k >= len(data):
+                break
+            lvl_now = _data_level(rows, data[i + k], increment)
+            col = i + k
+            color = line_colors[k]
+
+            if lvl_before[k] < lvl_now or lvl_before[k] > lvl_now:
+                drawing_down = lvl_before[k] < lvl_now
+                bottom = lvl_before[k] if drawing_down else lvl_now
+                top = lvl_now if drawing_down else lvl_before[k]
+                set_cell(bottom, col, URCORNER if drawing_down else ULCORNER, color)
+                set_cell(top, col, LLCORNER if drawing_down else LRCORNER, color)
+                if top - bottom > 1:
+                    for r in range(bottom + 1, top):
+                        set_cell(r, col, VLINE, color)
+
+                # Continuations of other metrics
+                for j in range(num_lines):
+                    if j == k:
+                        continue
+                    jc = line_colors[j]
+                    if lvl_before[j] == top:
+                        set_cell(top, col, BTEE, jc)
+                    elif lvl_before[j] == bottom:
+                        set_cell(bottom, col, TTEE, jc)
+                    elif bottom < lvl_before[j] < top:
+                        set_cell(lvl_before[j], col, PLUS, jc)
+                    else:
+                        set_cell(lvl_before[j], col, HLINE, jc)
+            else:
+                set_cell(lvl_now, col, HLINE, color)
+                for j in range(num_lines):
+                    if j != k and lvl_before[j] != lvl_now:
+                        set_cell(lvl_before[j], col, HLINE, line_colors[j])
+
+            lvl_before[k] = lvl_now
+
+    # Render rows 0..rows-1 (if level==rows appeared, merge onto rows-1)
+    for c in range(plot_cols):
+        if grid[rows][c] != " ":
+            # fold bottom overflow onto last visible row
+            if grid[rows - 1][c] == " ":
+                grid[rows - 1][c] = grid[rows][c]
+                colors[rows - 1][c] = colors[rows][c]
 
     box = Table(show_header=False, expand=True, box=None, padding=0)
     box.add_column("y", width=4, justify="right", no_wrap=True)
     box.add_column("plot", justify="left", no_wrap=True)
 
-    # Legend on first plot row
-    # Map canonical ticks onto rows (100 at top, 0 at bottom)
-    tick_at_row: dict[int, int] = {0: 100, height - 1: 0}
-    if height > 1:
-        for tick in (75, 50, 25):
-            tr = int(round((100 - tick) / 100.0 * (height - 1)))
-            tick_at_row.setdefault(tr, tick)
+    # Tick rows: map 100,75,50,25,0 onto visible rows 0..rows-1
+    tick_at: dict[int, int] = {}
+    for tick in (100, 75, 50, 25, 0):
+        tr = _data_level(rows, float(tick), increment)
+        tr = max(0, min(rows - 1, tr))
+        tick_at.setdefault(tr, tick)
 
-    for r in range(height):
-        if r in tick_at_row:
-            y_txt = Text(f"{tick_at_row[r]:3d}", style="bright_black")
-        else:
-            y_txt = Text("   ", style="bright_black")
-
+    for r in range(rows):
+        y_txt = Text(f"{tick_at[r]:3d}" if r in tick_at else "   ", style="bright_black")
         line = Text()
         line.append("│", style="bright_black")
-        for x in range(width):
-            ch = grid[r][x]
-            st = style_grid[r][x] or "bright_black"
+        for c in range(plot_cols):
+            ch = grid[r][c]
+            st = colors[r][c] or "bright_black"
             line.append(ch if ch != " " else " ", style=st)
         line.append("│", style="bright_black")
-        if r == 0:
+        if r < num_lines:
             line.append(" ", style="bright_black")
-            line.append("GPU%", style="cyan")
-            line.append(" ", style="bright_black")
-            line.append("MEM%", style="dark_orange")
+            line.append(legends[r], style=line_colors[r])
         box.add_row(y_txt, line)
 
-    # Bottom axis with time hints (newest on the right, like nvtop)
-    axis = Text("└", style="bright_black")
-    axis.append("─" * width, style="bright_black")
-    axis.append("┘", style="bright_black")
-    # newest on the right, like nvtop
+    axis = Text("└" + "─" * plot_cols + "┘", style="bright_black")
+    # time axis: oldest left -> newest right (nvtop default)
     tline = Text("    ", style="bright_black")
-    left, mid, right = f"-{width}", f"-{width // 2}", "-0"
-    pad_mid = max(width // 2 - len(left) - len(mid) // 2, 1)
-    pad_right = max(width - len(left) - pad_mid - len(mid) - len(right), 1)
-    tline.append(left, style="bright_black")
-    tline.append(" " * pad_mid, style="bright_black")
-    tline.append(mid, style="bright_black")
-    tline.append(" " * pad_right, style="bright_black")
-    tline.append(right, style="bright_black")
+    left, mid, right = f"-{n_samples}", f"-{n_samples // 2}", "-0"
+    pad_mid = max(plot_cols // 2 - len(left) - len(mid) // 2, 1)
+    pad_right = max(plot_cols - len(left) - pad_mid - len(mid) - len(right), 1)
+    tline.append(left + " " * pad_mid + mid + " " * pad_right + right, style="bright_black")
     box.add_row(Text("   ", style="bright_black"), axis)
     box.add_row(Text("   ", style="bright_black"), tline)
     return box
@@ -249,7 +305,7 @@ def nvtop_gpu_block(
         util_h = list(util_history or [])
         mem_h = list(mem_history or [])
         if util_h or mem_h:
-            box.add_row(nvtop_line_chart(util_h, mem_h, width=min(plot_width, 48), height=6))
+            box.add_row(nvtop_line_chart(util_h, mem_h, width=min(plot_width, 56), height=8))
         return box
 
     gpu_line = Text()
@@ -276,5 +332,5 @@ def nvtop_gpu_block(
     mem_h = list(mem_history or [])
     if util_h or mem_h:
         box.add_row(Text(""))
-        box.add_row(nvtop_line_chart(util_h, mem_h, width=plot_width, height=10))
+        box.add_row(nvtop_line_chart(util_h, mem_h, width=max(plot_width, 72), height=12))
     return box
