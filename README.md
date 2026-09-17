@@ -1,26 +1,26 @@
 <!-- som5ra-fork-install -->
-# GPU Watch（Som5ra 维护版）
+# GPU Watch with more info
 
-这是 [GPIOX/gpuwatch](https://github.com/GPIOX/gpuwatch) 的个人维护 fork：<https://github.com/Som5ra/gpuwatch>。
+Fork of [GPIOX/gpuwatch](https://github.com/GPIOX/gpuwatch): <https://github.com/Som5ra/gpuwatch>
 
-相对上游，本仓库额外包括：
+Extra features in this fork:
 
-- 每台机器顶部的主机摘要（CPU% / 内存 / 负载 / 磁盘读写）
-- 更接近 nvtop 的 GPU 历史曲线（ACS 阶梯折线）
-- DGX Spark **GB10** 统一内存适配（驱动报 Memory Not Supported 时，用进程 GPU 显存合计 + 主机 MemTotal）
+- Host summary bar per machine (CPU%, memory, load, disk read/write)
+- nvtop-style GPU util/mem history (ACS stair-step lines)
+- DGX Spark **GB10** unified-memory support (when the driver reports Memory Not Supported, used = sum of process GPU memory, total = host MemTotal)
 
-下面先讲**怎么安装本 fork**。更下面保留上游原有说明（安装命令仍指向 GPIOX，仅供对照）。
+Install steps for **this fork** are below. The original upstream README is kept underneath for reference (its install commands still point at GPIOX).
 
-## 快速安装（本 fork）
+## Quick install
 
-本地需要 **Python 3.10+** 和 [`uv`](https://docs.astral.sh/uv/)。远程机器**不用装 gpuwatch**，有 NVIDIA 驱动 + Python 3，并配置好 **SSH 公钥免密** 即可。
+You need **Python 3.10+** and [`uv`](https://docs.astral.sh/uv/) on the machine that runs the TUI. Remotes do **not** need gpuwatch installed—only an NVIDIA driver, Python 3, and **SSH public-key** login.
 
 ```bash
 uv tool install --force git+https://github.com/Som5ra/gpuwatch@main
 gpuwatch
 ```
 
-更新到最新：
+Update to latest:
 
 ```bash
 uv tool install --force git+https://github.com/Som5ra/gpuwatch@main
@@ -28,23 +28,23 @@ uv tool install --force git+https://github.com/Som5ra/gpuwatch@main
 
 ### Windows
 
-可以原生跑（需安装 [OpenSSH Client](https://learn.microsoft.com/windows-server/administration/openssh/openssh_install_firstuse)，终端里能执行 `ssh`），也建议用 Windows Terminal。配置文件在用户目录：
+Native Windows works if [OpenSSH Client](https://learn.microsoft.com/windows-server/administration/openssh/openssh_install_firstuse) is installed (`ssh` available in a terminal). Prefer Windows Terminal. Config paths:
 
 - `%USERPROFILE%\.ssh\config`
 - `%USERPROFILE%\.config\gpuwatch\servers.yml`
 
-在 WSL 里安装运行同样可以。
+Running inside WSL is also fine.
 
-### SSH（必需，免密）
+### SSH (required, key-based)
 
-本工具默认 `BatchMode=yes`，**不支持交互输密码**。请先公钥登录：
+gpuwatch uses `BatchMode=yes`, so **interactive password login is not supported**. Set up key auth first:
 
 ```bash
-ssh-keygen -t ed25519   # 若还没有密钥
-ssh-copy-id user@host   # Windows 可手动把公钥追加到远端 ~/.ssh/authorized_keys
+ssh-keygen -t ed25519   # if you do not already have a key
+ssh-copy-id user@host   # on Windows, append the public key to the remote ~/.ssh/authorized_keys manually
 ```
 
-`~/.ssh/config` 示例：
+Example `~/.ssh/config`:
 
 ```sshconfig
 Host 5090-1
@@ -56,22 +56,22 @@ Host dgx01
   User yourname
 ```
 
-确认 `ssh 5090-1` 不再要密码。
+Confirm `ssh 5090-1` works without a password prompt.
 
-### 服务器列表（推荐）
+### Server list (recommended)
 
-创建 `~/.config/gpuwatch/servers.yml`（Linux / macOS / WSL）：
+Create `~/.config/gpuwatch/servers.yml` (Linux / macOS / WSL):
 
 ```yaml
 refresh_seconds: 1.5
 timeout_seconds: 25.0
 servers:
-  - host: "5090-1"     # 必须等于 ssh config 里的 Host 别名
-    label: "5090-1"    # 界面显示名，可省略
-    enabled: true      # 启动时默认勾选；不写则为 false
-    timeout: 25        # 可选，单机覆盖超时（秒）
+  - host: "5090-1"     # must match the Host alias in ssh config
+    label: "5090-1"    # optional UI label
+    enabled: true      # pre-selected at startup; defaults to false if omitted
+    timeout: 25        # optional per-host timeout override (seconds)
 
-  - host: "4090"       # 纯数字主机名务必加引号
+  - host: "4090"       # quote numeric-looking hostnames
     label: "4090"
     enabled: true
 
@@ -80,29 +80,29 @@ servers:
     enabled: true
 ```
 
-说明：
+Notes:
 
-- 写了 `servers:` 之后，界面**只显示 yml 里列出的机器**。
-- 没有 yml 时，会列出 `~/.ssh/config` 里大部分 Host，默认不勾选，在界面里用 `Space` 勾选。
-- Tailscale / 慢链路把 `timeout_seconds` 或单机 `timeout` 调到 20～30。
+- If `servers:` is present, only those hosts appear in the UI.
+- Without a yml file, most hosts from `~/.ssh/config` are listed and none are selected until you press `Space`.
+- On Tailscale / slow links, raise `timeout_seconds` or per-host `timeout` to 20–30.
 
-### 常用按键
+### Keys
 
-| 按键 | 作用 |
+| Key | Action |
 |------|------|
-| `↑` `↓` | 移动服务器列表 |
-| `Space` | 勾选 / 取消 |
-| `r` | 强制刷新 |
-| `c` | 紧凑模式 |
-| `q` | 退出 |
+| `↑` `↓` | Move in the server list |
+| `Space` | Toggle selection |
+| `r` | Force refresh |
+| `c` | Compact mode |
+| `q` | Quit |
 
-### GB10 / DGX Spark 注意
+### GB10 / DGX Spark
 
-`nvidia-smi` 对 GB10 常显示 Memory Not Supported。本 fork 会把 **compute 进程的 GPU Memory 合计**当作 used，把 **主机 MemTotal** 当作 total（统一内存）。若要这个行为，请安装本仓库，不要装上游 GPIOX 原版。
+`nvidia-smi` often shows Memory Not Supported on GB10. This fork treats **summed compute-app GPU memory** as used and **host MemTotal** as total (unified memory). Install this repo for that behavior; upstream GPIOX will show 0 VRAM.
 
 ---
 
-# 以下为上游 README（保留）
+# Upstream README (kept below)
 
 <!-- /som5ra-fork-install -->
 
