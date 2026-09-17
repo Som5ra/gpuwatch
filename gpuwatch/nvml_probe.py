@@ -248,6 +248,47 @@ def _run_nvsmi_processes() -> dict[str, list[dict[str, Any]]]:
     return result
 
 
+
+
+def _host_mem_total_mb() -> int:
+    """Read MemTotal from /proc/meminfo (GB10 unified memory ceiling)."""
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    # kB -> MiB
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def _apply_unified_memory_fallback(gpu: dict[str, Any]) -> None:
+    """GB10 / Tegra-like GPUs report Memory Not Supported via NVML/smi.
+
+    Use sum of process GPU memory as used, and host RAM as total.
+    """
+    if int(gpu.get("memory_total_mb") or 0) > 0:
+        return
+    used = 0
+    for p in gpu.get("processes") or []:
+        used += int(p.get("used_memory_mb") or 0)
+    for u in gpu.get("other_users") or []:
+        used += int(u.get("total_memory_mb") or 0)
+    # If NVML processes empty, try nvidia-smi compute-apps once by uuid
+    if used <= 0:
+        uuid = gpu.get("uuid") or ""
+        if uuid:
+            apps = _run_nvsmi_processes().get(uuid, [])
+            used = sum(int(a.get("used_memory_mb") or 0) for a in apps)
+    total = _host_mem_total_mb()
+    if total <= 0:
+        total = max(used, 1)
+    gpu["memory_used_mb"] = used
+    gpu["memory_total_mb"] = total
+    gpu["memory_free_mb"] = max(total - used, 0)
+    gpu["memory_unified"] = True
+
 def _try_nvml_v2_memory(lib, handle) -> tuple[int, int] | None:
     """Try NVML v2 memory info to get reserved field. Returns (used_mb, free_mb) or None."""
     try:
@@ -806,6 +847,8 @@ def probe(
             )
             gpu["processes"] = processes
             gpu["other_users"] = other_users
+            # DGX Spark GB10: discrete VRAM fields are N/A — derive from processes + host RAM
+            _apply_unified_memory_fallback(gpu)
             gpus.append(gpu)
 
         elapsed = (time.monotonic() - t_start) * 1000
