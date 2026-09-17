@@ -16,7 +16,7 @@ from textual.widgets import Static
 
 from ..models import HostInfo, ServerSnapshot
 
-from .gpu_bar import _bar_style, _format_mem, memory_bar, power_str, temp_str, utilization_bar
+from .gpu_bar import _bar_style, _format_mem, nvtop_gpu_block
 
 
 
@@ -246,33 +246,16 @@ class ServerPanel(Static):
         return gpu_table
 
     def _build_full(self, snap: ServerSnapshot) -> Table:
-        """GPU metric rows in fixed columns, process info as indented text below."""
+        """Host meters + nvtop-like GPU blocks + processes."""
         wrapper = Table(show_header=False, expand=True, box=None, padding=(0, 1))
-        # Single-column wrapper so process text can flow freely
         wrapper.add_column("body", justify="left")
-
-        # ── GPU metric grid (nested fixed-column table) ──
-        gpu_grid = Table(show_header=False, expand=True, box=None, padding=0)
-        gpu_grid.add_column("gpu", width=5, justify="left")
-        gpu_grid.add_column("name", width=self.name_width, justify="left")
-        gpu_grid.add_column("util", width=15, justify="left")
-        gpu_grid.add_column("mem", width=36, justify="left")
-        gpu_grid.add_column("temp", width=5, justify="left")
-        gpu_grid.add_column("power", width=6, justify="left")
-
-        for gpu in snap.gpus:
-            gpu_grid.add_row(
-                Text(f"GPU {gpu.index}", style="bold cyan"),
-                Text(gpu.name, style="white"),
-                utilization_bar(gpu.utilization_gpu, width=11),
-                memory_bar(gpu.memory_used_mb, gpu.memory_total_mb, width=18),
-                temp_str(gpu.temperature_c),
-                power_str(gpu.power_watts, gpu.power_limit_watts),
-            )
 
         wrapper.add_row(_format_host_summary(snap.host_info))
         wrapper.add_row(Text(""))
-        wrapper.add_row(gpu_grid)
+
+        for gpu in snap.gpus:
+            wrapper.add_row(nvtop_gpu_block(gpu, compact=False))
+            wrapper.add_row(Text(""))
 
         # ── Process details (free-form indented text below GPU grid) ──
         for gpu in snap.gpus:
@@ -302,37 +285,11 @@ class ServerPanel(Static):
         return wrapper
 
     def _build_compact(self, snap: ServerSnapshot) -> Table:
-        """Compact: one line per GPU, process summary inline."""
-        gpu_grid = Table(show_header=False, expand=True, box=None, padding=0)
-        gpu_grid.add_column("gpu", width=5, justify="left")
-        gpu_grid.add_column("name", width=self.name_width, justify="left")
-        gpu_grid.add_column("util", width=14, justify="left")
-        gpu_grid.add_column("mem", width=37, justify="left")
-        gpu_grid.add_column("temp", width=5, justify="left")
-        gpu_grid.add_column("power", width=6, justify="left")
-        gpu_grid.add_column("proc", width=20, justify="left")
-
-        for gpu in snap.gpus:
-            proc_parts: list[str] = [p.name for p in gpu.processes]
-            if gpu.other_users:
-                other_total = sum(ou.total_memory_mb for ou in gpu.other_users)
-                other_count = sum(ou.process_count for ou in gpu.other_users)
-                proc_parts.append(f"+{other_count}o/{_format_mem(other_total)}")
-            proc_str = ", ".join(proc_parts) if proc_parts else "—"
-
-            gpu_grid.add_row(
-                Text(f"GPU {gpu.index}", style="bold cyan"),
-                Text(gpu.name, style="white"),
-                utilization_bar(gpu.utilization_gpu, width=10),
-                memory_bar(gpu.memory_used_mb, gpu.memory_total_mb, width=18),
-                temp_str(gpu.temperature_c),
-                power_str(gpu.power_watts, gpu.power_limit_watts),
-                Text(_truncate(proc_str, 23), style="green"),
-            )
-
+        """Compact: host meters + one-line nvtop GPU rows."""
         wrapper = Table(show_header=False, expand=True, box=None, padding=(0, 1))
         wrapper.add_column("body", justify="left")
         wrapper.add_row(_format_host_summary(snap.host_info))
         wrapper.add_row(Text(""))
-        wrapper.add_row(gpu_grid)
+        for gpu in snap.gpus:
+            wrapper.add_row(nvtop_gpu_block(gpu, compact=True))
         return wrapper
