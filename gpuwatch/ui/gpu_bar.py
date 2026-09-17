@@ -151,11 +151,6 @@ def history_plot(
             elif level > lo:
                 ch = _LEVELS[level - lo]
                 style = "yellow"
-            elif row_from_top == height - 1:
-                # Always show a dim baseline on the bottom row so "flat 0%"
-                # is visibly a line, not an empty black box.
-                ch = "─"
-                style = "bright_black"
             else:
                 ch = " "
                 style = "bright_black"
@@ -212,10 +207,7 @@ def nvtop_gpu_block(
             spark = Text("  ")
             for v in _resample(hist, min(plot_width, 32)):
                 idx = int(round(max(0.0, min(v, 100.0)) / 100.0 * 8))
-                if idx <= 0:
-                    spark.append("─", style="bright_black")
-                else:
-                    spark.append(_LEVELS[idx], style="yellow")
+                spark.append(_LEVELS[idx] if idx > 0 else " ", style="yellow")
             box.add_row(spark)
         return box
 
