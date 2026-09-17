@@ -100,6 +100,42 @@ class GPUInfo:
         )
 
 
+
+@dataclass
+class HostInfo:
+    """Host-level summary (CPU / memory / load / disk rates). Optional."""
+
+    cpu_percent: float
+    mem_used_mb: int
+    mem_total_mb: int
+    load1: float
+    disk_read_mb_s: float
+    disk_write_mb_s: float
+
+    @property
+    def mem_percent(self) -> float:
+        if self.mem_total_mb <= 0:
+            return 0.0
+        return (self.mem_used_mb / self.mem_total_mb) * 100.0
+
+    @classmethod
+    def from_probe(cls, data: dict[str, Any]) -> HostInfo | None:
+        """Parse host block from probe JSON. Returns None if missing/invalid."""
+        if not data or not isinstance(data, dict):
+            return None
+        try:
+            return cls(
+                cpu_percent=float(data.get("cpu_percent", 0.0)),
+                mem_used_mb=int(data.get("mem_used_mb", 0)),
+                mem_total_mb=int(data.get("mem_total_mb", 0)),
+                load1=float(data.get("load1", 0.0)),
+                disk_read_mb_s=float(data.get("disk_read_mb_s", 0.0)),
+                disk_write_mb_s=float(data.get("disk_write_mb_s", 0.0)),
+            )
+        except (TypeError, ValueError):
+            return None
+
+
 ServerStatus = Literal[
     "ok", "connecting", "timeout", "error", "stale", "auth_error", "no_python", "down"
 ]
@@ -116,6 +152,7 @@ class ServerSnapshot:
     error: str | None = None
     updated_at: float = 0.0
     latency_ms: float | None = None
+    host_info: HostInfo | None = None
 
     @classmethod
     def from_probe(
@@ -127,6 +164,7 @@ class ServerSnapshot:
     ) -> ServerSnapshot:
         """Build a snapshot from successful probe output."""
         gpus = [GPUInfo.from_probe(g) for g in data.get("gpus", [])]
+        host_info = HostInfo.from_probe(data.get("host") or {})
         return cls(
             host=host,
             label=label,
@@ -134,6 +172,7 @@ class ServerSnapshot:
             gpus=gpus,
             updated_at=time.time(),
             latency_ms=latency_ms,
+            host_info=host_info,
         )
 
     @classmethod
@@ -154,6 +193,7 @@ class ServerSnapshot:
             error=error,
             updated_at=time.time(),
             latency_ms=previous.latency_ms if previous else None,
+            host_info=previous.host_info if previous else None,
         )
 
 
