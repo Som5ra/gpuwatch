@@ -120,64 +120,20 @@ def _resample(values: Sequence[float], width: int) -> list[float]:
 
 
 
+
 def _pad_history(values: Sequence[float], n: int) -> list[float | None]:
-    """Right-align real samples. Missing left slots are None (not drawn as 0%)."""
+    """Right-align real samples. Missing left slots stay None (not drawn as 0%)."""
     vals = [max(0.0, min(100.0, float(v))) for v in values]
     if n <= 0:
         return []
     if len(vals) >= n:
-        return vals[-n:]  # type: ignore[return-value]
-    return [None] * (n - len(vals)) + vals  # type: ignore[return-value]
+        return list(vals[-n:])
+    return [None] * (n - len(vals)) + vals
 
 
-# Braille: 2x4 dots per cell. Bit order:
-#  (0,0)=1 (1,0)=8
-#  (0,1)=2 (1,1)=16
-#  (0,2)=4 (1,2)=32
-#  (0,3)=64 (1,3)=128
-_BRAILLE_BITS = (
-    (0x01, 0x08),
-    (0x02, 0x10),
-    (0x04, 0x20),
-    (0x40, 0x80),
-)
-
-
-def _braille_set(grid: list[list[int]], x_dot: int, y_dot: int, cols_dots: int, rows_dots: int) -> None:
-    if not (0 <= x_dot < cols_dots and 0 <= y_dot < rows_dots):
-        return
-    cx, cy = x_dot // 2, y_dot // 4
-    bx, by = x_dot % 2, y_dot % 4
-    if 0 <= cy < len(grid) and 0 <= cx < len(grid[0]):
-        grid[cy][cx] |= _BRAILLE_BITS[by][bx]
-
-
-def _draw_braille_polyline(
-    grid: list[list[int]],
-    points: Sequence[tuple[int, int | None]],
-    cols_dots: int,
-    rows_dots: int,
-) -> None:
-    """Draw polyline through (x_dot, y_dot) samples; None y skips (gap)."""
-    prev: tuple[int, int] | None = None
-    for x, y in points:
-        if y is None:
-            prev = None
-            continue
-        if prev is None:
-            _braille_set(grid, x, y, cols_dots, rows_dots)
-            prev = (x, y)
-            continue
-        x0, y0 = prev
-        x1, y1 = x, y
-        dx = x1 - x0
-        dy = y1 - y0
-        steps = max(abs(dx), abs(dy), 1)
-        for s in range(steps + 1):
-            xi = int(round(x0 + dx * s / steps))
-            yi = int(round(y0 + dy * s / steps))
-            _braille_set(grid, xi, yi, cols_dots, rows_dots)
-        prev = (x1, y1)
+def _data_level(rows: int, data: float, increment: float) -> int:
+    """Port of nvtop data_level(): row 0 is top (100%)."""
+    return int(rows - round(data / increment))
 
 
 def nvtop_line_chart(
@@ -187,83 +143,142 @@ def nvtop_line_chart(
     width: int = 72,
     height: int = 12,
 ) -> Table:
-    """nvtop-like dual series chart with braille polylines.
+    """Faithful port of Syllo/nvtop src/plot.c nvtop_line_plot.
 
-    Stair-step ACS corners look like a big rectangle on sudden 0→100 jumps.
-    Braille gives thin diagonal lines instead of a vertical wall + zero baseline box.
-    Left side is blank until enough real samples exist (no fake 0% padding).
-    Y: 100 at top, 0 at bottom.
+    Solid ACS lines (─ │ ┌ ┐ └ ┘ ┬ ┴ ┼). Two series interleaved so each
+    column also continues the other series — that is what makes nvtop look
+    continuous rather than dashed.
+
+    Left side stays blank until real samples exist (no fake 0% padding that
+    turned cold-start 0→100 jumps into a giant rectangle).
     """
-    rows = max(height, 4)
-    cols = max(width, 16)
-    # Braille: each char = 2x4 dots
-    rows_dots = rows * 4
-    cols_dots = cols * 2
+    num_lines = 2
+    rows = max(height, 2)
+    increment = 100.0 / float(rows)
 
-    util = _pad_history(util_history, cols)
-    mem = _pad_history(mem_history, cols)
+    # Each time sample occupies num_lines columns (nvtop layout).
+    n_samples = max(width // num_lines, 1)
+    plot_cols = n_samples * num_lines
+
+    util = _pad_history(util_history, n_samples)
+    mem = _pad_history(mem_history, n_samples)
     n_real = sum(1 for v in util if v is not None)
 
-    def to_y_dot(v: float) -> int:
-        # 100% → y_dot 0 (top), 0% → rows_dots-1 (bottom)
-        return int(round((100.0 - v) / 100.0 * (rows_dots - 1)))
+    # Unicode ACS equivalents used by nvtop
+    HLINE, VLINE = "─", "│"
+    ULCORNER, URCORNER = "┌", "┐"
+    LLCORNER, LRCORNER = "└", "┘"
+    TTEE, BTEE, PLUS = "┬", "┴", "┼"
 
-    util_grid = [[0 for _ in range(cols)] for _ in range(rows)]
-    mem_grid = [[0 for _ in range(cols)] for _ in range(rows)]
+    grid = [[" " for _ in range(plot_cols)] for _ in range(rows + 1)]
+    colors: list[list[str | None]] = [[None for _ in range(plot_cols)] for _ in range(rows + 1)]
+    line_colors = ["cyan", "dark_orange"]
+    legends = ["GPU0 %", "GPU0 mem%"]
 
-    util_pts: list[tuple[int, int | None]] = []
-    mem_pts: list[tuple[int, int | None]] = []
-    for i in range(cols):
-        # center of braille cell column pair
-        x_dot = i * 2 + 1
-        u, m = util[i], mem[i]
-        util_pts.append((x_dot, to_y_dot(u) if u is not None else None))
-        mem_pts.append((x_dot, to_y_dot(m) if m is not None else None))
+    def set_cell(r: int, c: int, ch: str, color: str) -> None:
+        r = max(0, min(rows, r))
+        if 0 <= c < plot_cols:
+            grid[r][c] = ch
+            colors[r][c] = color
 
-    _draw_braille_polyline(util_grid, util_pts, cols_dots, rows_dots)
-    _draw_braille_polyline(mem_grid, mem_pts, cols_dots, rows_dots)
+    # Find first column index that has real data; skip blank prefix entirely.
+    first_real = 0
+    while first_real < n_samples and util[first_real] is None and mem[first_real] is None:
+        first_real += 1
 
-    line_colors = ("cyan", "dark_orange")
-    legends = ("GPU0 %", "GPU0 mem%")
+    if first_real < n_samples:
+        # Seed levels from first real sample of each series (fallback 0 only for level math).
+        def seed_val(series: list[float | None], idx: int) -> float:
+            for j in range(idx, n_samples):
+                if series[j] is not None:
+                    return float(series[j])
+            return 0.0
+
+        lvl_before = [
+            _data_level(rows, seed_val(util, first_real), increment),
+            _data_level(rows, seed_val(mem, first_real), increment),
+        ]
+
+        for s in range(first_real, n_samples):
+            sample_vals = [util[s], mem[s]]
+            i = s * num_lines  # column base, like nvtop's i
+            for k in range(num_lines):
+                raw = sample_vals[k]
+                if raw is None:
+                    # No sample yet for this series — still continue the other line
+                    # on this column if it already has a level.
+                    continue
+                lvl_now = _data_level(rows, float(raw), increment)
+                col = i + k
+                color = line_colors[k]
+
+                if lvl_before[k] != lvl_now:
+                    drawing_down = lvl_before[k] < lvl_now
+                    bottom = lvl_before[k] if drawing_down else lvl_now
+                    top = lvl_now if drawing_down else lvl_before[k]
+                    set_cell(bottom, col, URCORNER if drawing_down else ULCORNER, color)
+                    set_cell(top, col, LLCORNER if drawing_down else LRCORNER, color)
+                    if top - bottom > 1:
+                        for r in range(bottom + 1, top):
+                            set_cell(r, col, VLINE, color)
+
+                    for j in range(num_lines):
+                        if j == k:
+                            continue
+                        jc = line_colors[j]
+                        if lvl_before[j] == top:
+                            set_cell(top, col, BTEE, jc)
+                        elif lvl_before[j] == bottom:
+                            set_cell(bottom, col, TTEE, jc)
+                        elif bottom < lvl_before[j] < top:
+                            set_cell(lvl_before[j], col, PLUS, jc)
+                        else:
+                            set_cell(lvl_before[j], col, HLINE, jc)
+                else:
+                    set_cell(lvl_now, col, HLINE, color)
+                    for j in range(num_lines):
+                        if j != k and lvl_before[j] != lvl_now:
+                            set_cell(lvl_before[j], col, HLINE, line_colors[j])
+
+                lvl_before[k] = lvl_now
+
+    # Fold level==rows onto last visible row
+    for c in range(plot_cols):
+        if grid[rows][c] != " ":
+            if grid[rows - 1][c] == " ":
+                grid[rows - 1][c] = grid[rows][c]
+                colors[rows - 1][c] = colors[rows][c]
 
     box = Table(show_header=False, expand=True, box=None, padding=0)
     box.add_column("y", width=4, justify="right", no_wrap=True)
     box.add_column("plot", justify="left", no_wrap=True)
 
-    # Tick labels at 100/75/50/25/0
     tick_at: dict[int, int] = {}
     for tick in (100, 75, 50, 25, 0):
-        tr = int(round((100.0 - tick) / 100.0 * (rows - 1)))
+        tr = _data_level(rows, float(tick), increment)
+        tr = max(0, min(rows - 1, tr))
         tick_at.setdefault(tr, tick)
 
     for r in range(rows):
         y_txt = Text(f"{tick_at[r]:3d}" if r in tick_at else "   ", style="bright_black")
         line = Text()
         line.append("│", style="bright_black")
-        for c in range(cols):
-            ub, mb = util_grid[r][c], mem_grid[r][c]
-            if ub and mb:
-                # Prefer util color when both occupy the cell; still show combined dots
-                ch = chr(0x2800 + (ub | mb))
-                line.append(ch, style=line_colors[0])
-            elif ub:
-                line.append(chr(0x2800 + ub), style=line_colors[0])
-            elif mb:
-                line.append(chr(0x2800 + mb), style=line_colors[1])
-            else:
-                line.append(" ", style="bright_black")
+        for c in range(plot_cols):
+            ch = grid[r][c]
+            st = colors[r][c] or "bright_black"
+            line.append(ch if ch != " " else " ", style=st)
         line.append("│", style="bright_black")
-        if r < 2:
+        if r < num_lines:
             line.append(" ", style="bright_black")
             line.append(legends[r], style=line_colors[r])
         box.add_row(y_txt, line)
 
-    axis = Text("└" + "─" * cols + "┘", style="bright_black")
+    axis = Text("└" + "─" * plot_cols + "┘", style="bright_black")
     span = max(n_real, 1)
     left, mid, right = f"-{span}", f"-{span // 2}", "-0"
     tline = Text("    ", style="bright_black")
-    pad_mid = max(cols // 2 - len(left) - len(mid) // 2, 1)
-    pad_right = max(cols - len(left) - pad_mid - len(mid) - len(right), 1)
+    pad_mid = max(plot_cols // 2 - len(left) - len(mid) // 2, 1)
+    pad_right = max(plot_cols - len(left) - pad_mid - len(mid) - len(right), 1)
     tline.append(left + " " * pad_mid + mid + " " * pad_right + right, style="bright_black")
     box.add_row(Text("   ", style="bright_black"), axis)
     box.add_row(Text("   ", style="bright_black"), tline)
