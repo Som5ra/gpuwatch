@@ -216,24 +216,35 @@ def nvtop_line_chart(
                     drawing_down = lvl_before[k] < lvl_now
                     bottom = lvl_before[k] if drawing_down else lvl_now
                     top = lvl_now if drawing_down else lvl_before[k]
-                    set_cell(bottom, col, URCORNER if drawing_down else ULCORNER, color)
-                    set_cell(top, col, LLCORNER if drawing_down else LRCORNER, color)
-                    if top - bottom > 1:
-                        for r in range(bottom + 1, top):
-                            set_cell(r, col, VLINE, color)
-
-                    for j in range(num_lines):
-                        if j == k:
-                            continue
-                        jc = line_colors[j]
-                        if lvl_before[j] == top:
-                            set_cell(top, col, BTEE, jc)
-                        elif lvl_before[j] == bottom:
-                            set_cell(bottom, col, TTEE, jc)
-                        elif bottom < lvl_before[j] < top:
-                            set_cell(lvl_before[j], col, PLUS, jc)
-                        else:
-                            set_cell(lvl_before[j], col, HLINE, jc)
+                    jump = top - bottom
+                    # Full-height ACS walls on 100↔0 look like a door/box.
+                    # Keep nvtop stairs for modest steps; for huge jumps just
+                    # start a new horizontal run (official screenshots also
+                    # read as floating ─ segments more than tall │ shafts).
+                    max_stair = max(2, rows // 5)
+                    if jump <= max_stair:
+                        set_cell(bottom, col, URCORNER if drawing_down else ULCORNER, color)
+                        set_cell(top, col, LLCORNER if drawing_down else LRCORNER, color)
+                        if jump > 1:
+                            for r in range(bottom + 1, top):
+                                set_cell(r, col, VLINE, color)
+                        for j in range(num_lines):
+                            if j == k:
+                                continue
+                            jc = line_colors[j]
+                            if lvl_before[j] == top:
+                                set_cell(top, col, BTEE, jc)
+                            elif lvl_before[j] == bottom:
+                                set_cell(bottom, col, TTEE, jc)
+                            elif bottom < lvl_before[j] < top:
+                                set_cell(lvl_before[j], col, PLUS, jc)
+                            else:
+                                set_cell(lvl_before[j], col, HLINE, jc)
+                    else:
+                        set_cell(lvl_now, col, HLINE, color)
+                        for j in range(num_lines):
+                            if j != k:
+                                set_cell(lvl_before[j], col, HLINE, line_colors[j])
                 else:
                     set_cell(lvl_now, col, HLINE, color)
                     for j in range(num_lines):
