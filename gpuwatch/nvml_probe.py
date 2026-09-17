@@ -434,14 +434,47 @@ def _gpu_processes(
 _MIN_HOST_SAMPLE_S = 0.05
 
 
-def _read_cpu_times() -> tuple[int, int]:
-    """Return (idle_including_iowait, total) jiffies from /proc/stat."""
-    with open("/proc/stat", "r") as f:
-        parts = f.readline().split()
+def _parse_cpu_line(parts: list[str]) -> tuple[int, int]:
+    """Return (idle_including_iowait, total) jiffies from one /proc/stat cpu line."""
     vals = [int(x) for x in parts[1:]]
     idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
     total = sum(vals)
     return idle, total
+
+
+def _read_cpu_times() -> tuple[int, int]:
+    """Return aggregate (idle, total) from the first cpu line."""
+    with open("/proc/stat", "r") as f:
+        parts = f.readline().split()
+    return _parse_cpu_line(parts)
+
+
+def _read_cpu_times_all() -> tuple[tuple[int, int], list[tuple[int, int]]]:
+    """Return (aggregate, per-core) idle/total jiffies from /proc/stat."""
+    aggregate: tuple[int, int] | None = None
+    cores: list[tuple[int, int]] = []
+    with open("/proc/stat", "r") as f:
+        for line in f:
+            if not line.startswith("cpu"):
+                break
+            parts = line.split()
+            name = parts[0]
+            idle_total = _parse_cpu_line(parts)
+            if name == "cpu":
+                aggregate = idle_total
+            elif name.startswith("cpu") and name[3:].isdigit():
+                cores.append(idle_total)
+    if aggregate is None:
+        aggregate = (0, 0)
+    return aggregate, cores
+
+
+def _cpu_percent(idle0: int, total0: int, idle1: int, total1: int) -> float:
+    d_total = total1 - total0
+    d_idle = idle1 - idle0
+    if d_total <= 0:
+        return 0.0
+    return max(0.0, min(100.0, (1.0 - d_idle / d_total) * 100.0))
 
 
 def _is_physical_disk(name: str) -> bool:
@@ -480,8 +513,8 @@ def _read_disk_sectors() -> tuple[int, int]:
     return read_s, write_s
 
 
-def _read_mem_mb() -> tuple[int, int]:
-    """Return (used_mb, total_mb) from MemAvailable/MemTotal."""
+def _read_mem_mb() -> dict[str, int]:
+    """htop-like memory breakdown in MiB."""
     meminfo: dict[str, int] = {}
     with open("/proc/meminfo", "r") as f:
         for line in f:
@@ -489,10 +522,23 @@ def _read_mem_mb() -> tuple[int, int]:
                 continue
             key, rest = line.split(":", 1)
             meminfo[key] = int(rest.strip().split()[0])  # kB
-    total_kb = meminfo.get("MemTotal", 0)
-    avail_kb = meminfo.get("MemAvailable", meminfo.get("MemFree", 0))
-    used_kb = max(total_kb - avail_kb, 0)
-    return used_kb // 1024, total_kb // 1024
+    total = meminfo.get("MemTotal", 0)
+    free = meminfo.get("MemFree", 0)
+    buffers = meminfo.get("Buffers", 0)
+    cached = meminfo.get("Cached", 0) + meminfo.get("SReclaimable", 0)
+    # Approximate htop "used" (non-cache)
+    used = max(total - free - buffers - cached, 0)
+    swap_total = meminfo.get("SwapTotal", 0)
+    swap_free = meminfo.get("SwapFree", 0)
+    swap_used = max(swap_total - swap_free, 0)
+    return {
+        "mem_used_mb": used // 1024,
+        "mem_buffers_mb": buffers // 1024,
+        "mem_cached_mb": cached // 1024,
+        "mem_total_mb": total // 1024,
+        "swap_used_mb": swap_used // 1024,
+        "swap_total_mb": swap_total // 1024,
+    }
 
 
 def _read_load1() -> float:
@@ -505,32 +551,32 @@ def _collect_host(sample0: tuple | None = None, t0: float | None = None) -> dict
 
     If sample0/t0 provided, they are the first CPU/disk sample taken earlier
     in the probe (so we reuse NVML work time instead of always sleeping).
+    sample0 shape: (aggregate, cores, disk) where aggregate/cores are idle/total.
     """
     try:
         if sample0 is None or t0 is None:
-            idle0, total0 = _read_cpu_times()
+            agg0, cores0 = _read_cpu_times_all()
             disk0 = _read_disk_sectors()
             t0 = time.monotonic()
             time.sleep(_MIN_HOST_SAMPLE_S)
         else:
-            idle0, total0, disk0 = sample0[0], sample0[1], sample0[2]
+            agg0, cores0, disk0 = sample0[0], sample0[1], sample0[2]
 
         elapsed = time.monotonic() - t0
         if elapsed < _MIN_HOST_SAMPLE_S:
             time.sleep(_MIN_HOST_SAMPLE_S - elapsed)
 
-        idle1, total1 = _read_cpu_times()
+        agg1, cores1 = _read_cpu_times_all()
         disk1 = _read_disk_sectors()
         dt = max(time.monotonic() - t0, 1e-6)
 
-        d_total = total1 - total0
-        d_idle = idle1 - idle0
-        if d_total <= 0:
-            cpu = 0.0
-        else:
-            cpu = max(0.0, min(100.0, (1.0 - d_idle / d_total) * 100.0))
+        cpu = _cpu_percent(agg0[0], agg0[1], agg1[0], agg1[1])
+        per_core: list[float] = []
+        n = min(len(cores0), len(cores1))
+        for i in range(n):
+            per_core.append(round(_cpu_percent(cores0[i][0], cores0[i][1], cores1[i][0], cores1[i][1]), 1))
 
-        used_mb, total_mb = _read_mem_mb()
+        mem = _read_mem_mb()
         load1 = _read_load1()
 
         sector = 512.0
@@ -539,8 +585,13 @@ def _collect_host(sample0: tuple | None = None, t0: float | None = None) -> dict
 
         return {
             "cpu_percent": round(cpu, 1),
-            "mem_used_mb": used_mb,
-            "mem_total_mb": total_mb,
+            "cpu_per_core": per_core,
+            "mem_used_mb": mem["mem_used_mb"],
+            "mem_buffers_mb": mem["mem_buffers_mb"],
+            "mem_cached_mb": mem["mem_cached_mb"],
+            "mem_total_mb": mem["mem_total_mb"],
+            "swap_used_mb": mem["swap_used_mb"],
+            "swap_total_mb": mem["swap_total_mb"],
             "load1": round(load1, 2),
             "disk_read_mb_s": round(r_mb, 1),
             "disk_write_mb_s": round(w_mb, 1),
@@ -572,9 +623,9 @@ def probe(
     host_sample0 = None
     host_t0 = None
     try:
-        _idle0, _total0 = _read_cpu_times()
+        _agg0, _cores0 = _read_cpu_times_all()
         _disk0 = _read_disk_sectors()
-        host_sample0 = (_idle0, _total0, _disk0)
+        host_sample0 = (_agg0, _cores0, _disk0)
         host_t0 = time.monotonic()
     except Exception:
         host_sample0 = None

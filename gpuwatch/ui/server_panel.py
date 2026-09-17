@@ -20,35 +20,133 @@ from .gpu_bar import _bar_style, _format_mem, memory_bar, power_str, temp_str, u
 
 
 
-def _format_host_summary(host_info: HostInfo | None) -> Text:
-    """One-line host summary: CPU | MEM | LOAD | DISK."""
-    line = Text()
+def _mini_bar(percent: float, width: int = 10) -> Text:
+    """Compact htop-style bar."""
+    pct = max(0.0, min(float(percent), 100.0))
+    filled = int(round(pct / 100.0 * width))
+    filled = min(filled, width)
+    bar = "█" * filled + "░" * (width - filled)
+    t = Text(bar, style=_bar_style(pct))
+    t.append(f"{pct:3.0f}%", style=_bar_style(pct))
+    return t
+
+
+def _mem_stack_bar(host: HostInfo, width: int = 24) -> Text:
+    """htop-like Mem bar: used / buffers / cache / free."""
+    total = max(host.mem_total_mb, 1)
+    used = max(host.mem_used_mb, 0)
+    buffers = max(host.mem_buffers_mb, 0)
+    cached = max(host.mem_cached_mb, 0)
+    # Scale segments into width
+    parts = [
+        (used, "green"),
+        (buffers, "blue"),
+        (cached, "yellow"),
+    ]
+    units = 0
+    segs: list[tuple[int, str]] = []
+    for amt, color in parts:
+        n = int(round(amt / total * width))
+        segs.append((n, color))
+        units += n
+    free_n = max(width - units, 0)
+    # Fix overflow
+    while sum(n for n, _ in segs) + free_n > width and segs:
+        # trim last non-zero
+        for i in range(len(segs) - 1, -1, -1):
+            if segs[i][0] > 0:
+                segs[i] = (segs[i][0] - 1, segs[i][1])
+                break
+        else:
+            break
+    free_n = width - sum(n for n, _ in segs)
+    out = Text()
+    for n, color in segs:
+        if n:
+            out.append("█" * n, style=color)
+    if free_n:
+        out.append("░" * free_n, style="bright_black")
+    used_g = host.mem_used_mb / 1024
+    total_g = host.mem_total_mb / 1024
+    out.append(f" {used_g:.1f}/{total_g:.1f}G", style="white")
+    return out
+
+
+def _format_host_summary(host_info: HostInfo | None) -> Table:
+    """htop-style CPU per-core meters + Mem/Swap + load/disk."""
+    box = Table(show_header=False, expand=True, box=None, padding=0)
+    box.add_column("meters", justify="left")
+
     if host_info is None:
-        line.append("CPU —  MEM —  LOAD —  DISK —", style="bright_black")
-        return line
+        box.add_row(Text("CPU/MEM —", style="bright_black"))
+        return box
 
-    cpu = host_info.cpu_percent
-    line.append("CPU ", style="bright_black")
-    line.append(f"{cpu:.0f}%", style=_bar_style(cpu))
-    line.append("  ", style="bright_black")
+    cores = host_info.cpu_per_core or [host_info.cpu_percent]
+    n = len(cores)
+    # Choose columns by core count (htop-like multi-column)
+    if n <= 8:
+        cols, bar_w = 2, 12
+    elif n <= 16:
+        cols, bar_w = 4, 8
+    elif n <= 32:
+        cols, bar_w = 4, 6
+    else:
+        cols, bar_w = 8, 4
 
-    mem_pct = host_info.mem_percent
-    used = host_info.mem_used_mb / 1024
-    total = host_info.mem_total_mb / 1024
-    line.append("MEM ", style="bright_black")
-    line.append(f"{used:.1f}/{total:.0f}G ({mem_pct:.0f}%)", style=_bar_style(mem_pct))
-    line.append("  ", style="bright_black")
+    cpu_grid = Table(show_header=False, expand=False, box=None, padding=(0, 1))
+    for _ in range(cols):
+        cpu_grid.add_column(justify="left")
 
-    line.append("LOAD ", style="bright_black")
-    line.append(f"{host_info.load1:.2f}", style="white")
-    line.append("  ", style="bright_black")
+    # Header
+    head = Text()
+    head.append(f"CPU ({n} cores)  avg ", style="bright_black")
+    head.append(f"{host_info.cpu_percent:.0f}%", style=_bar_style(host_info.cpu_percent))
+    box.add_row(head)
 
-    line.append("DISK ", style="bright_black")
-    line.append(f"↑{host_info.disk_read_mb_s:.0f}", style="cyan")
-    line.append(" ", style="bright_black")
-    line.append(f"↓{host_info.disk_write_mb_s:.0f}", style="magenta")
-    line.append(" MB/s", style="bright_black")
-    return line
+    row: list[Text] = []
+    for i, pct in enumerate(cores):
+        cell = Text()
+        cell.append(f"{i:>2}[", style="bright_black")
+        cell += _mini_bar(pct, width=bar_w)
+        cell.append("]", style="bright_black")
+        row.append(cell)
+        if len(row) == cols:
+            cpu_grid.add_row(*row)
+            row = []
+    if row:
+        while len(row) < cols:
+            row.append(Text(""))
+        cpu_grid.add_row(*row)
+    box.add_row(cpu_grid)
+
+    mem_line = Text()
+    mem_line.append("Mem [", style="bright_black")
+    mem_line += _mem_stack_bar(host_info, width=28)
+    mem_line.append("]", style="bright_black")
+    box.add_row(mem_line)
+
+    if host_info.swap_total_mb > 0:
+        sw = host_info.swap_used_mb / max(host_info.swap_total_mb, 1) * 100.0
+        swap_line = Text()
+        swap_line.append("Swp [", style="bright_black")
+        swap_line += _mini_bar(sw, width=28)
+        swap_line.append(
+            f" {host_info.swap_used_mb/1024:.1f}/{host_info.swap_total_mb/1024:.1f}G",
+            style="white",
+        )
+        swap_line.append("]", style="bright_black")
+        box.add_row(swap_line)
+
+    foot = Text()
+    foot.append("Load ", style="bright_black")
+    foot.append(f"{host_info.load1:.2f}", style="white")
+    foot.append("  Disk ", style="bright_black")
+    foot.append(f"↑{host_info.disk_read_mb_s:.0f}", style="cyan")
+    foot.append(" ", style="bright_black")
+    foot.append(f"↓{host_info.disk_write_mb_s:.0f}", style="magenta")
+    foot.append(" MB/s", style="bright_black")
+    box.add_row(foot)
+    return box
 
 
 def _truncate(text: str, max_len: int = 70) -> str:

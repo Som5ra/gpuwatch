@@ -111,6 +111,15 @@ class HostInfo:
     load1: float
     disk_read_mb_s: float
     disk_write_mb_s: float
+    cpu_per_core: list[float] = field(default_factory=list)
+    mem_buffers_mb: int = 0
+    mem_cached_mb: int = 0
+    swap_used_mb: int = 0
+    swap_total_mb: int = 0
+
+    @property
+    def cpu_cores(self) -> int:
+        return len(self.cpu_per_core)
 
     @property
     def mem_percent(self) -> float:
@@ -124,6 +133,8 @@ class HostInfo:
         if not data or not isinstance(data, dict):
             return None
         try:
+            cores_raw = data.get("cpu_per_core") or []
+            cores = [float(x) for x in cores_raw]
             return cls(
                 cpu_percent=float(data.get("cpu_percent", 0.0)),
                 mem_used_mb=int(data.get("mem_used_mb", 0)),
@@ -131,6 +142,11 @@ class HostInfo:
                 load1=float(data.get("load1", 0.0)),
                 disk_read_mb_s=float(data.get("disk_read_mb_s", 0.0)),
                 disk_write_mb_s=float(data.get("disk_write_mb_s", 0.0)),
+                cpu_per_core=cores,
+                mem_buffers_mb=int(data.get("mem_buffers_mb", 0)),
+                mem_cached_mb=int(data.get("mem_cached_mb", 0)),
+                swap_used_mb=int(data.get("swap_used_mb", 0)),
+                swap_total_mb=int(data.get("swap_total_mb", 0)),
             )
         except (TypeError, ValueError):
             return None
