@@ -145,15 +145,20 @@ def history_plot(
             # capacity in this row: 8 sublevels
             lo = (height - 1 - row_from_top) * 8
             hi = lo + 8
-            if level <= lo:
-                ch = " "
-                style = "bright_black"
-            elif level >= hi:
+            if level >= hi:
                 ch = "█"
                 style = "yellow"
-            else:
+            elif level > lo:
                 ch = _LEVELS[level - lo]
                 style = "yellow"
+            elif row_from_top == height - 1:
+                # Always show a dim baseline on the bottom row so "flat 0%"
+                # is visibly a line, not an empty black box.
+                ch = "─"
+                style = "bright_black"
+            else:
+                ch = " "
+                style = "bright_black"
             rows[r].append(ch, style=style)
 
     y_labels = ["100", " 75", " 50", " 25"] if height == 4 else [f"{int(100*(height-r)/height):3d}" for r in range(height)]
@@ -207,7 +212,10 @@ def nvtop_gpu_block(
             spark = Text("  ")
             for v in _resample(hist, min(plot_width, 32)):
                 idx = int(round(max(0.0, min(v, 100.0)) / 100.0 * 8))
-                spark.append(_LEVELS[idx], style="yellow")
+                if idx <= 0:
+                    spark.append("─", style="bright_black")
+                else:
+                    spark.append(_LEVELS[idx], style="yellow")
             box.add_row(spark)
         return box
 
