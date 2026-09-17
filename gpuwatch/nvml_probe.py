@@ -17,6 +17,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import json
+import re
 import os
 import sys
 import time
@@ -425,6 +426,129 @@ def _gpu_processes(
     return own_procs, other_list
 
 
+
+# ---------------------------------------------------------------------------
+# Host summary (/proc) — lightweight, stdlib only
+# ---------------------------------------------------------------------------
+
+_MIN_HOST_SAMPLE_S = 0.05
+
+
+def _read_cpu_times() -> tuple[int, int]:
+    """Return (idle_including_iowait, total) jiffies from /proc/stat."""
+    with open("/proc/stat", "r") as f:
+        parts = f.readline().split()
+    vals = [int(x) for x in parts[1:]]
+    idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
+    total = sum(vals)
+    return idle, total
+
+
+def _is_physical_disk(name: str) -> bool:
+    """Whole disks only — skip loop/ram/dm and partitions."""
+    if name.startswith(("loop", "ram", "dm-", "md", "zram")):
+        return False
+    if re.match(r"^nvme\d+n\d+p\d+$", name):
+        return False
+    if re.match(r"^mmcblk\d+p\d+$", name):
+        return False
+    if re.match(r"^(sd|vd|hd|xvd)[a-z]+\d+$", name):
+        return False
+    if re.match(r"^(sd|vd|hd|xvd)[a-z]+$", name):
+        return True
+    if re.match(r"^nvme\d+n\d+$", name):
+        return True
+    if re.match(r"^mmcblk\d+$", name):
+        return True
+    return False
+
+
+def _read_disk_sectors() -> tuple[int, int]:
+    """Sum read/write sectors across physical disks."""
+    read_s = 0
+    write_s = 0
+    with open("/proc/diskstats", "r") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 14:
+                continue
+            name = parts[2]
+            if not _is_physical_disk(name):
+                continue
+            read_s += int(parts[5])
+            write_s += int(parts[9])
+    return read_s, write_s
+
+
+def _read_mem_mb() -> tuple[int, int]:
+    """Return (used_mb, total_mb) from MemAvailable/MemTotal."""
+    meminfo: dict[str, int] = {}
+    with open("/proc/meminfo", "r") as f:
+        for line in f:
+            if ":" not in line:
+                continue
+            key, rest = line.split(":", 1)
+            meminfo[key] = int(rest.strip().split()[0])  # kB
+    total_kb = meminfo.get("MemTotal", 0)
+    avail_kb = meminfo.get("MemAvailable", meminfo.get("MemFree", 0))
+    used_kb = max(total_kb - avail_kb, 0)
+    return used_kb // 1024, total_kb // 1024
+
+
+def _read_load1() -> float:
+    with open("/proc/loadavg", "r") as f:
+        return float(f.read().split()[0])
+
+
+def _collect_host(sample0: tuple | None = None, t0: float | None = None) -> dict[str, Any] | None:
+    """Build host summary dict.
+
+    If sample0/t0 provided, they are the first CPU/disk sample taken earlier
+    in the probe (so we reuse NVML work time instead of always sleeping).
+    """
+    try:
+        if sample0 is None or t0 is None:
+            idle0, total0 = _read_cpu_times()
+            disk0 = _read_disk_sectors()
+            t0 = time.monotonic()
+            time.sleep(_MIN_HOST_SAMPLE_S)
+        else:
+            idle0, total0, disk0 = sample0[0], sample0[1], sample0[2]
+
+        elapsed = time.monotonic() - t0
+        if elapsed < _MIN_HOST_SAMPLE_S:
+            time.sleep(_MIN_HOST_SAMPLE_S - elapsed)
+
+        idle1, total1 = _read_cpu_times()
+        disk1 = _read_disk_sectors()
+        dt = max(time.monotonic() - t0, 1e-6)
+
+        d_total = total1 - total0
+        d_idle = idle1 - idle0
+        if d_total <= 0:
+            cpu = 0.0
+        else:
+            cpu = max(0.0, min(100.0, (1.0 - d_idle / d_total) * 100.0))
+
+        used_mb, total_mb = _read_mem_mb()
+        load1 = _read_load1()
+
+        sector = 512.0
+        r_mb = max(0.0, (disk1[0] - disk0[0]) * sector / dt / (1024 * 1024))
+        w_mb = max(0.0, (disk1[1] - disk0[1]) * sector / dt / (1024 * 1024))
+
+        return {
+            "cpu_percent": round(cpu, 1),
+            "mem_used_mb": used_mb,
+            "mem_total_mb": total_mb,
+            "load1": round(load1, 2),
+            "disk_read_mb_s": round(r_mb, 1),
+            "disk_write_mb_s": round(w_mb, 1),
+        }
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Main probe logic
 # ---------------------------------------------------------------------------
@@ -443,6 +567,18 @@ def probe(
             nvidia-smi is used for one-time calibration.
     """
     t_start = time.monotonic()
+
+    # First host sample (CPU/disk) — finish after NVML so we usually avoid an extra sleep
+    host_sample0 = None
+    host_t0 = None
+    try:
+        _idle0, _total0 = _read_cpu_times()
+        _disk0 = _read_disk_sectors()
+        host_sample0 = (_idle0, _total0, _disk0)
+        host_t0 = time.monotonic()
+    except Exception:
+        host_sample0 = None
+        host_t0 = None
 
     # Find and load libnvidia-ml
     lib_path = ctypes.util.find_library("nvidia-ml")
@@ -623,12 +759,16 @@ def probe(
 
         elapsed = (time.monotonic() - t_start) * 1000
 
-        return {
+        result = {
             "ok": True,
             "gpus": gpus,
             "elapsed_ms": round(elapsed, 1),
             "reserved_offsets": reserved_offsets if reserved_offsets else {},
         }
+        host = _collect_host(sample0=host_sample0, t0=host_t0)
+        if host is not None:
+            result["host"] = host
+        return result
 
     finally:
         lib.nvmlShutdown()

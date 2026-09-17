@@ -14,9 +14,41 @@ from rich.table import Table
 from rich.text import Text
 from textual.widgets import Static
 
-from ..models import ServerSnapshot
+from ..models import HostInfo, ServerSnapshot
 
-from .gpu_bar import _format_mem, memory_bar, power_str, temp_str, utilization_bar
+from .gpu_bar import _bar_style, _format_mem, memory_bar, power_str, temp_str, utilization_bar
+
+
+
+def _format_host_summary(host_info: HostInfo | None) -> Text:
+    """One-line host summary: CPU | MEM | LOAD | DISK."""
+    line = Text()
+    if host_info is None:
+        line.append("CPU —  MEM —  LOAD —  DISK —", style="bright_black")
+        return line
+
+    cpu = host_info.cpu_percent
+    line.append("CPU ", style="bright_black")
+    line.append(f"{cpu:.0f}%", style=_bar_style(cpu))
+    line.append("  ", style="bright_black")
+
+    mem_pct = host_info.mem_percent
+    used = host_info.mem_used_mb / 1024
+    total = host_info.mem_total_mb / 1024
+    line.append("MEM ", style="bright_black")
+    line.append(f"{used:.1f}/{total:.0f}G ({mem_pct:.0f}%)", style=_bar_style(mem_pct))
+    line.append("  ", style="bright_black")
+
+    line.append("LOAD ", style="bright_black")
+    line.append(f"{host_info.load1:.2f}", style="white")
+    line.append("  ", style="bright_black")
+
+    line.append("DISK ", style="bright_black")
+    line.append(f"↑{host_info.disk_read_mb_s:.0f}", style="cyan")
+    line.append(" ", style="bright_black")
+    line.append(f"↓{host_info.disk_write_mb_s:.0f}", style="magenta")
+    line.append(" MB/s", style="bright_black")
+    return line
 
 
 def _truncate(text: str, max_len: int = 70) -> str:
