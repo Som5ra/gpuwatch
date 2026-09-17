@@ -8,6 +8,7 @@ and running processes for one server. Updates on each polling cycle.
 from __future__ import annotations
 
 import time
+from collections import deque
 
 from rich.panel import Panel
 from rich.table import Table
@@ -149,6 +150,10 @@ class ServerPanel(Static):
         self._snapshot: ServerSnapshot | None = None
         self.compact: bool = False
         self.name_width: int = 10  # set by Dashboard, updated dynamically
+        # Per-GPU utilization / memory history for nvtop-like plots
+        self._hist_len = 60
+        self._util_hist: dict[int, deque[float]] = {}
+        self._mem_hist: dict[int, deque[float]] = {}
 
     @property
     def host(self) -> str:
@@ -157,6 +162,16 @@ class ServerPanel(Static):
     def update_snapshot(self, snapshot: ServerSnapshot) -> None:
         """Update with a new snapshot and re-render."""
         self._snapshot = snapshot
+        if snapshot.status == "ok":
+            for gpu in snapshot.gpus:
+                uh = self._util_hist.setdefault(
+                    gpu.index, deque(maxlen=self._hist_len)
+                )
+                mh = self._mem_hist.setdefault(
+                    gpu.index, deque(maxlen=self._hist_len)
+                )
+                uh.append(float(gpu.utilization_gpu))
+                mh.append(float(gpu.memory_percent))
         self.refresh(layout=True)
 
     def render(self) -> Panel:
@@ -254,7 +269,12 @@ class ServerPanel(Static):
         wrapper.add_row(Text(""))
 
         for gpu in snap.gpus:
-            wrapper.add_row(nvtop_gpu_block(gpu, compact=False))
+            wrapper.add_row(nvtop_gpu_block(
+                gpu,
+                compact=False,
+                util_history=self._util_hist.get(gpu.index),
+                mem_history=self._mem_hist.get(gpu.index),
+            ))
             wrapper.add_row(Text(""))
 
         # ── Process details (free-form indented text below GPU grid) ──
@@ -291,5 +311,11 @@ class ServerPanel(Static):
         wrapper.add_row(_format_host_summary(snap.host_info))
         wrapper.add_row(Text(""))
         for gpu in snap.gpus:
-            wrapper.add_row(nvtop_gpu_block(gpu, compact=True))
+            wrapper.add_row(nvtop_gpu_block(
+                gpu,
+                compact=True,
+                util_history=self._util_hist.get(gpu.index),
+                mem_history=self._mem_hist.get(gpu.index),
+                plot_width=32,
+            ))
         return wrapper
