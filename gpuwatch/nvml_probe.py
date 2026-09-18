@@ -472,7 +472,7 @@ def _gpu_processes(
 # Host summary (/proc) — lightweight, stdlib only
 # ---------------------------------------------------------------------------
 
-_MIN_HOST_SAMPLE_S = 0.05
+_MIN_HOST_SAMPLE_S = 0.25  # disk rates need a longer window than CPU; 50ms was often 0
 
 
 def _parse_cpu_line(parts: list[str]) -> tuple[int, int]:

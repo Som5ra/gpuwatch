@@ -123,9 +123,9 @@ def _format_host_summary(host_info: HostInfo | None) -> Table:
     foot.append("Load ", style="bright_black")
     foot.append(f"{host_info.load1:.2f}", style="white")
     foot.append("  Disk ", style="bright_black")
-    foot.append(f"↑{host_info.disk_read_mb_s:.0f}", style="cyan")
+    foot.append(f"R{host_info.disk_read_mb_s:.1f}", style="cyan")
     foot.append(" ", style="bright_black")
-    foot.append(f"↓{host_info.disk_write_mb_s:.0f}", style="magenta")
+    foot.append(f"W{host_info.disk_write_mb_s:.1f}", style="magenta")
     foot.append(" MB/s", style="bright_black")
     box.add_row(foot)
     return box
